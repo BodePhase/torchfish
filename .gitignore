@@ -1,0 +1,22 @@
+# Python & Ambienti Virtuali
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Node / Frontend
+node_modules/
+torchfish-ui/node_modules/
+torchfish-ui/dist/
+
+# Dataset pesanti (opzionale: rimuovi il commento se superano i 100MB di limite GitHub)
+*.csv
+*.pgn
+
+# Pesi PyTorch (opzionale: lascia commentato se vuoi caricare kasparov_policy.pth e pesa < 100MB)
+# *.pth
+
+# File di sistema e IDE
+.DS_Store
+.env
