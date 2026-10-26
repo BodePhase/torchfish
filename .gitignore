@@ -20,3 +20,6 @@ torchfish-ui/dist/
 # File di sistema e IDE
 .DS_Store
 .env
+
+# Repomix output
+repomix-output.xml

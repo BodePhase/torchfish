@@ -12,7 +12,13 @@ const PIECE_SYMBOLS = {
 
 const PROMOTION_PIECES = ['q', 'r', 'b', 'n'];
 
-// Suoni ufficiali Lichess (repository open-source lila)
+const LEGENDS = [
+  { id: 'kasparov', name: 'Garry Kasparov', badge: '🔥', title: 'Il Mostro di Baku', desc: 'Dinamico, offensivo, iniziativa massima' },
+  { id: 'tal', name: 'Mikhail Tal', badge: '⚡', title: 'Il Mago di Riga', desc: 'Sacrifici speculativi e attacchi al Re' },
+  { id: 'karpov', name: 'Anatoly Karpov', badge: '🛡️', title: 'Il Boa Costrittore', desc: 'Profilassi posizionale, zero rischi' },
+  { id: 'carlsen', name: 'Magnus Carlsen', badge: '🧊', title: 'Il Maestro dei Finali', desc: 'Precisione universale e pressione costante' },
+];
+
 const SOUND_URLS = {
   move: 'https://raw.githubusercontent.com/ornicar/lila/master/public/sound/standard/Move.mp3',
   capture: 'https://raw.githubusercontent.com/ornicar/lila/master/public/sound/standard/Capture.mp3',
@@ -61,6 +67,25 @@ const calculateMaterial = (chessInstance) => {
   };
 };
 
+// Converte la valutazione in pedoni (dal punto di vista del Bianco) in percentuale di altezza (3% - 97%)
+const evalToWhitePercentage = (evalWhite, mateIn) => {
+  if (mateIn !== null && mateIn !== undefined) {
+    return mateIn > 0 ? 100 : 0;
+  }
+  const clamped = Math.max(-15, Math.min(15, evalWhite || 0));
+  const pct = 100 / (1 + Math.exp(-0.32 * clamped));
+  return Math.max(3, Math.min(97, pct));
+};
+
+const formatEvalLabel = (evalWhite, mateIn) => {
+  if (mateIn !== null && mateIn !== undefined) {
+    return `M${Math.abs(mateIn)}`;
+  }
+  const val = Number(evalWhite || 0);
+  const sign = val > 0 ? '+' : '';
+  return `${sign}${val.toFixed(1)}`;
+};
+
 const formatMoveToFigurine = (san) => {
   if (!san) return '';
   return san
@@ -90,7 +115,7 @@ const findCheckedKingSquare = (chessInstance) => {
   return null;
 };
 
-const detectGameOver = (chessInstance) => {
+const detectGameOver = (chessInstance, legendName) => {
   const isOver = typeof chessInstance.isGameOver === 'function'
     ? chessInstance.isGameOver()
     : chessInstance.game_over?.();
@@ -98,7 +123,7 @@ const detectGameOver = (chessInstance) => {
 
   const isCheckmate = chessInstance.isCheckmate?.() ?? chessInstance.in_checkmate?.();
   if (isCheckmate) {
-    const winner = chessInstance.turn() === 'w' ? 'Nero (Kasparov-Net)' : 'Bianco';
+    const winner = chessInstance.turn() === 'w' ? `Nero (${legendName})` : 'Bianco';
     return { title: 'Scacco Matto!', subtitle: `Vittoria del ${winner}` };
   }
   if (chessInstance.isStalemate?.() ?? chessInstance.in_stalemate?.()) {
@@ -119,25 +144,30 @@ export default function App() {
   const moveListRef = useRef(null);
   const audioCacheRef = useRef({});
 
+  // Ogni snapshot salva anche evalWhite e mateIn per aggiornare la barra scorrendo lo storico
   const [snapshots, setSnapshots] = useState([
-    { fen: INITIAL_FEN, san: null, from: null, to: null }
+    { fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null }
   ]);
   const [viewIndex, setViewIndex] = useState(0);
 
+  const [selectedLegend, setSelectedLegend] = useState('kasparov');
   const [playerColor, setPlayerColor] = useState('w');
   const [kasparovThinking, setKasparovThinking] = useState(false);
   const [moveFrom, setMoveFrom] = useState(null);
   const [rightClickedSquares, setRightClickedSquares] = useState({});
   const [pendingPromotion, setPendingPromotion] = useState(null);
   const [resignedWinner, setResignedWinner] = useState(null);
-  const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [] });
+  const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [], isBook: false });
   const [copiedBadge, setCopiedBadge] = useState(null);
 
-  // Nuovi stati per Audio e Frecce IA
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAIArrows, setShowAIArrows] = useState(false);
 
-  // Pre-caricamento degli effetti sonori di Lichess
+  const activeLegendObj = useMemo(
+    () => LEGENDS.find((l) => l.id === selectedLegend) || LEGENDS[0],
+    [selectedLegend]
+  );
+
   useEffect(() => {
     Object.entries(SOUND_URLS).forEach(([key, url]) => {
       const audio = new Audio(url);
@@ -147,7 +177,6 @@ export default function App() {
     });
   }, []);
 
-  // Riproduce il suono appropriato in base al contesto della mossa
   const playMoveSound = useCallback((moveObj, chessInstance) => {
     if (!soundEnabled || !moveObj) return;
 
@@ -183,8 +212,8 @@ export default function App() {
       return { title: 'Partita Terminata', subtitle: `Abbandono — Vince ${resignedWinner}` };
     }
     const liveGame = new Chess(snapshots[snapshots.length - 1].fen);
-    return detectGameOver(liveGame);
-  }, [snapshots, resignedWinner]);
+    return detectGameOver(liveGame, activeLegendObj.name);
+  }, [snapshots, resignedWinner, activeLegendObj.name]);
 
   const legalMovesForSelected = useMemo(() => {
     if (!moveFrom || isViewingHistory || gameOverStatus) return [];
@@ -207,8 +236,7 @@ export default function App() {
         setViewIndex((prev) => {
           const nextIdx = Math.min(snapshots.length - 1, prev + 1);
           if (nextIdx !== prev && snapshots[nextIdx]) {
-            const tempGame = new Chess(snapshots[nextIdx].fen);
-            playMoveSound(snapshots[nextIdx], tempGame);
+            playMoveSound(snapshots[nextIdx], new Chess(snapshots[nextIdx].fen));
           }
           return nextIdx;
         });
@@ -224,7 +252,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [snapshots, playMoveSound]);
 
-  const makeAIMove = useCallback(async (currentFen) => {
+  const makeAIMove = useCallback(async (currentFen, legendToUse = selectedLegend) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -236,12 +264,12 @@ export default function App() {
       const response = await fetch('http://localhost:8000/api/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: currentFen }),
+        body: JSON.stringify({ fen: currentFen, legend: legendToUse }),
         signal: controller.signal,
       });
 
       const data = await response.json();
-      await new Promise((r) => setTimeout(r, 450));
+      await new Promise((r) => setTimeout(r, 380));
 
       if (controller.signal.aborted) return;
 
@@ -249,19 +277,34 @@ export default function App() {
         const moveObj = masterGameRef.current.move(data.best_move_san);
         if (moveObj) {
           const newFen = masterGameRef.current.fen();
+          const isCheckmateNow = masterGameRef.current.isCheckmate?.() ?? masterGameRef.current.in_checkmate?.();
+          const computedMate = isCheckmateNow
+            ? (masterGameRef.current.turn() === 'w' ? -1 : 1)
+            : (data.mate_in ?? null);
+
           playMoveSound(moveObj, masterGameRef.current);
 
           setSnapshots((prev) => {
             const next = [
               ...prev,
-              { fen: newFen, san: moveObj.san, from: moveObj.from, to: moveObj.to, captured: moveObj.captured }
+              {
+                fen: newFen,
+                san: moveObj.san,
+                from: moveObj.from,
+                to: moveObj.to,
+                captured: moveObj.captured,
+                evalWhite: data.eval_white ?? prev[prev.length - 1].evalWhite,
+                mateIn: computedMate
+              }
             ];
             setViewIndex(next.length - 1);
             return next;
           });
+
           setTelemetry({
             confidence: data.confidence ?? null,
-            topMoves: data.top_moves ?? [{ san: data.best_move_san, uci: data.best_move_uci, prob: data.confidence ?? 100 }]
+            topMoves: data.top_moves ?? [{ san: data.best_move_san, uci: data.best_move_uci, prob: data.confidence ?? 100 }],
+            isBook: Boolean(data.is_book_move)
           });
         }
       }
@@ -274,7 +317,7 @@ export default function App() {
         setKasparovThinking(false);
       }
     }
-  }, [playMoveSound]);
+  }, [selectedLegend, playMoveSound]);
 
   const commitUserMove = useCallback((from, to, promotionPiece = 'q') => {
     try {
@@ -287,12 +330,27 @@ export default function App() {
       if (!moveObj) return false;
 
       const newFen = masterGameRef.current.fen();
+      const isCheckmateNow = masterGameRef.current.isCheckmate?.() ?? masterGameRef.current.in_checkmate?.();
+      const userMate = isCheckmateNow ? (masterGameRef.current.turn() === 'w' ? -1 : 1) : null;
+
+      // Stima immediata basata sul materiale finché il server non risponde
+      const matNow = calculateMaterial(masterGameRef.current);
+      const quickEval = Number(((matNow.whiteAdvantage - matNow.blackAdvantage) || 0).toFixed(1));
+
       playMoveSound(moveObj, masterGameRef.current);
 
       setSnapshots((prev) => {
         const next = [
           ...prev,
-          { fen: newFen, san: moveObj.san, from: moveObj.from, to: moveObj.to, captured: moveObj.captured }
+          {
+            fen: newFen,
+            san: moveObj.san,
+            from: moveObj.from,
+            to: moveObj.to,
+            captured: moveObj.captured,
+            evalWhite: userMate ? (userMate > 0 ? 99.0 : -99.0) : quickEval,
+            mateIn: userMate
+          }
         ];
         setViewIndex(next.length - 1);
         return next;
@@ -304,13 +362,13 @@ export default function App() {
 
       const isOver = masterGameRef.current.isGameOver?.() ?? masterGameRef.current.game_over?.();
       if (!isOver) {
-        setTimeout(() => makeAIMove(newFen), 50);
+        setTimeout(() => makeAIMove(newFen, selectedLegend), 40);
       }
       return true;
     } catch {
       return false;
     }
-  }, [makeAIMove, playMoveSound]);
+  }, [makeAIMove, playMoveSound, selectedLegend]);
 
   const isPromotionMove = (from, to) => {
     const piece = masterGameRef.current.get(from);
@@ -388,12 +446,12 @@ export default function App() {
     });
   }
 
-  const startNewGame = (color = playerColor) => {
+  const startNewGame = (color = playerColor, legendId = selectedLegend) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
     masterGameRef.current = new Chess();
-    setSnapshots([{ fen: INITIAL_FEN, san: null, from: null, to: null }]);
+    setSnapshots([{ fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null }]);
     setViewIndex(0);
     setPlayerColor(color);
     setKasparovThinking(false);
@@ -401,23 +459,23 @@ export default function App() {
     setPendingPromotion(null);
     setRightClickedSquares({});
     setResignedWinner(null);
-    setTelemetry({ confidence: null, topMoves: [] });
+    setTelemetry({ confidence: null, topMoves: [], isBook: false });
 
     if (color === 'b') {
-      setTimeout(() => makeAIMove(INITIAL_FEN), 150);
+      setTimeout(() => makeAIMove(INITIAL_FEN, legendId), 150);
     }
   };
 
   const handleFlipColor = () => {
     const nextColor = playerColor === 'w' ? 'b' : 'w';
-    startNewGame(nextColor);
+    startNewGame(nextColor, selectedLegend);
   };
 
   const handleResign = () => {
     if (gameOverStatus) return;
     if (abortControllerRef.current) abortControllerRef.current.abort();
     setKasparovThinking(false);
-    setResignedWinner('TorchFish (Kasparov)');
+    setResignedWinner(activeLegendObj.name);
     if (soundEnabled && audioCacheRef.current.gameEnd) {
       audioCacheRef.current.gameEnd.currentTime = 0;
       audioCacheRef.current.gameEnd.play().catch(() => {});
@@ -443,13 +501,12 @@ export default function App() {
     return pairs;
   }, [snapshots]);
 
-  // Frecce candidate dell'IA (attive solo se l'utente abilita "Frecce IA", così non sovrascrivono il drag destro manuale)
   const aiCandidateArrows = useMemo(() => {
     if (!showAIArrows || !telemetry.topMoves.length) return undefined;
     const colors = [
-      'rgba(32, 110, 167, 0.85)', // 1° scelta: Blu Lichess
-      'rgba(98, 153, 36, 0.70)',  // 2° scelta: Verde
-      'rgba(230, 157, 0, 0.55)'   // 3° scelta: Giallo/Arancio
+      'rgba(32, 110, 167, 0.85)',
+      'rgba(98, 153, 36, 0.70)',
+      'rgba(230, 157, 0, 0.55)'
     ];
     return telemetry.topMoves
       .filter((m) => m.uci && m.uci.length >= 4)
@@ -499,14 +556,28 @@ export default function App() {
   const userCaptured = playerColor === 'w' ? material.blackCaptured : material.whiteCaptured;
   const userAdvantage = playerColor === 'w' ? material.whiteAdvantage : material.blackAdvantage;
 
+  // Calcolo altezza e orientamento della Barra di Valutazione Verticale
+  const whiteHeightPct = evalToWhitePercentage(currentSnapshot.evalWhite, currentSnapshot.mateIn);
+  const evalLabel = formatEvalLabel(currentSnapshot.evalWhite, currentSnapshot.mateIn);
+  const whiteIsWinning = (currentSnapshot.mateIn ?? currentSnapshot.evalWhite ?? 0) >= 0;
+
   return (
     <div className="lichess-container">
-      {/* COLONNA SCACCHIERA */}
+      {/* COLONNA SCACCHIERA + BARRA VALUTAZIONE */}
       <div className="board-column">
         <div className="player-info">
           <div className="player-title">
             <span className="status-dot" data-thinking={kasparovThinking} />
-            <span>{kasparovThinking ? '🧠 Kasparov sta riflettendo...' : '🤖 TorchFish (Kasparov-Net)'}</span>
+            <span>
+              {kasparovThinking
+                ? `🧠 ${activeLegendObj.name} sta calcolando (MCTS)...`
+                : `${activeLegendObj.badge} ${activeLegendObj.name} (${activeLegendObj.title})`}
+            </span>
+            {telemetry.isBook && !kasparovThinking && (
+              <span className="book-badge" title="Mossa storica giocata realmente dal Grande Maestro">
+                📖 Book
+              </span>
+            )}
           </div>
           <div className="captured-pieces">
             {aiCaptured.map((p, i) => <span key={`ai-${i}`}>{p}</span>)}
@@ -514,52 +585,66 @@ export default function App() {
           </div>
         </div>
 
-        <div className="board-container" onContextMenu={(e) => e.preventDefault()}>
-          <Chessboard
-            position={currentSnapshot.fen}
-            onPieceDrop={onDrop}
-            onSquareClick={onSquareClick}
-            onSquareRightClick={onSquareRightClick}
-            onPieceDragBegin={onPieceDragBegin}
-            boardOrientation={playerColor === 'w' ? 'white' : 'black'}
-            customSquareStyles={customSquareStyles}
-            showBoardNotation={true}
-            arePiecesDraggable={!kasparovThinking && !isViewingHistory && !gameOverStatus}
-            areArrowsAllowed={true}
-            customArrowColor="rgba(255, 170, 0, 0.85)"
-            {...(aiCandidateArrows ? { customArrows: aiCandidateArrows } : {})}
-          />
+        {/* WRAPPER: BARRA DI VALUTAZIONE A SINISTRA + SCACCHIERA A DESTRA */}
+        <div className="board-with-eval">
+          <div
+            className={`eval-bar ${playerColor === 'b' ? 'flipped' : ''}`}
+            title={`Valutazione motore: ${evalLabel}`}
+          >
+            <div
+              className="eval-bar-white"
+              style={{ height: `${whiteHeightPct}%` }}
+            />
+            <span className={`eval-score ${whiteIsWinning ? 'score-white' : 'score-black'}`}>
+              {evalLabel}
+            </span>
+          </div>
 
-          {/* SELETTORE GRAFICO PROMOZIONE PEDONE */}
-          {pendingPromotion && (
-            <div className="promotion-backdrop" onClick={() => setPendingPromotion(null)}>
-              <div className="promotion-modal" onClick={(e) => e.stopPropagation()}>
-                <div className="promotion-title">Scegli il pezzo per la promozione</div>
-                <div className="promotion-options">
-                  {PROMOTION_PIECES.map((type) => (
-                    <button
-                      key={type}
-                      className="promotion-btn"
-                      onClick={() => commitUserMove(pendingPromotion.from, pendingPromotion.to, type)}
-                    >
-                      {PIECE_SYMBOLS[pendingPromotion.color][type]}
-                    </button>
-                  ))}
+          <div className="board-container" onContextMenu={(e) => e.preventDefault()}>
+            <Chessboard
+              position={currentSnapshot.fen}
+              onPieceDrop={onDrop}
+              onSquareClick={onSquareClick}
+              onSquareRightClick={onSquareRightClick}
+              onPieceDragBegin={onPieceDragBegin}
+              boardOrientation={playerColor === 'w' ? 'white' : 'black'}
+              customSquareStyles={customSquareStyles}
+              showBoardNotation={true}
+              arePiecesDraggable={!kasparovThinking && !isViewingHistory && !gameOverStatus}
+              areArrowsAllowed={true}
+              customArrowColor="rgba(255, 170, 0, 0.85)"
+              {...(aiCandidateArrows ? { customArrows: aiCandidateArrows } : {})}
+            />
+
+            {pendingPromotion && (
+              <div className="promotion-backdrop" onClick={() => setPendingPromotion(null)}>
+                <div className="promotion-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="promotion-title">Scegli il pezzo per la promozione</div>
+                  <div className="promotion-options">
+                    {PROMOTION_PIECES.map((type) => (
+                      <button
+                        key={type}
+                        className="promotion-btn"
+                        onClick={() => commitUserMove(pendingPromotion.from, pendingPromotion.to, type)}
+                      >
+                        {PIECE_SYMBOLS[pendingPromotion.color][type]}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* OVERLAY FINE PARTITA */}
-          {gameOverStatus && (
-            <div className="gameover-banner">
-              <div className="gameover-title">{gameOverStatus.title}</div>
-              <div className="gameover-subtitle">{gameOverStatus.subtitle}</div>
-              <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor)}>
-                Gioca Ancora
-              </button>
-            </div>
-          )}
+            {gameOverStatus && (
+              <div className="gameover-banner">
+                <div className="gameover-title">{gameOverStatus.title}</div>
+                <div className="gameover-subtitle">{gameOverStatus.subtitle}</div>
+                <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor, selectedLegend)}>
+                  Gioca Ancora
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="player-info">
@@ -578,16 +663,39 @@ export default function App() {
         </div>
       </div>
 
-      {/* COLONNA LATERALE: TELEMETRIA, STORICO E CONTROLLI */}
+      {/* COLONNA LATERALE: SELETTORE LEGGENDE, TELEMETRIA, STORICO E CONTROLLI */}
       <div className="sidebar-column">
+        {/* SELETTORE DI LEGGENDE (PUNTO C) */}
+        <div className="legend-selector-panel">
+          <div className="legend-panel-label">👑 Avversario (Stile Grande Maestro)</div>
+          <div className="legend-grid">
+            {LEGENDS.map((leg) => (
+              <button
+                key={leg.id}
+                className={`legend-card ${selectedLegend === leg.id ? 'selected' : ''}`}
+                onClick={() => setSelectedLegend(leg.id)}
+                title={leg.desc}
+              >
+                <span className="legend-emoji">{leg.badge}</span>
+                <div className="legend-meta">
+                  <span className="legend-name">{leg.name.split(' ')[1]}</span>
+                  <span className="legend-sub">{leg.title.replace('Il ', '')}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="legend-active-desc">{activeLegendObj.desc}</div>
+        </div>
+
+        {/* TELEMETRIA MCTS + POLICY NET */}
         <div className="telemetry-panel">
           <div className="telemetry-header">
-            <span>⚡ Policy Network (4544 UCI)</span>
+            <span>⚡ MCTS + Policy</span>
             <div className="telemetry-tools">
               <button
                 className={`tool-toggle ${showAIArrows ? 'active' : ''}`}
                 onClick={() => setShowAIArrows((prev) => !prev)}
-                title="Mostra/Nascondi frecce delle mosse candidate di Kasparov"
+                title="Mostra/Nascondi frecce delle mosse candidate"
               >
                 🎯 Frecce IA
               </button>
@@ -620,11 +728,12 @@ export default function App() {
             </div>
           ) : (
             <div className="telemetry-empty">
-              Trascina col tasto destro sulla scacchiera per disegnare frecce tattiche
+              Seleziona una Leggenda o muovi un pezzo per avviare l&apos;analisi MCTS
             </div>
           )}
         </div>
 
+        {/* NAVIGAZIONE STORICO */}
         <div className="nav-Controls">
           <button
             className="nav-btn"
@@ -666,6 +775,7 @@ export default function App() {
           </button>
         </div>
 
+        {/* CRONOLOGIA MOSSE */}
         <div className="move-list" ref={moveListRef}>
           {movePairs.map((pair) => (
             <div key={pair.moveNumber} className="move-row">
@@ -686,9 +796,10 @@ export default function App() {
           ))}
         </div>
 
+        {/* BARRA CONTROLLI PARTITA */}
         <div className="action-bar">
           <div className="action-row">
-            <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor)}>
+            <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor, selectedLegend)}>
               Nuova Partita
             </button>
             <button className="ctrl-btn" onClick={handleFlipColor} title="Inverti colore e scacchiera">

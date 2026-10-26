@@ -1,4 +1,4 @@
-/* App.css - Stile clone Lichess/Chess.com per TorchFish */
+/* App.css - Stile Lichess/Chess.com con Eval Bar e Selettore Leggende */
 
 .lichess-container {
   display: flex;
@@ -6,9 +6,9 @@
   justify-content: center;
   align-items: stretch;
   gap: 24px;
-  padding: 20px;
+  padding: 18px 20px;
   width: 100%;
-  max-width: 1320px;
+  max-width: 1360px;
   margin: 0 auto;
   box-sizing: border-box;
   font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -19,7 +19,7 @@
 .board-column {
   flex: 1;
   width: 100%;
-  max-width: 78vh;
+  max-width: 80vh;
   min-width: 320px;
   display: flex;
   flex-direction: column;
@@ -29,8 +29,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 4px;
-  font-size: 1.05rem;
+  padding: 8px 4px 8px 36px; /* Allineato al bordo sinistro della scacchiera dopo la Eval Bar */
+  font-size: 1.02rem;
   color: #ffffff;
 }
 
@@ -54,6 +54,15 @@
   box-shadow: 0 0 8px #e69d00;
 }
 
+.book-badge {
+  background-color: rgba(32, 110, 167, 0.3);
+  border: 1px solid #206ea7;
+  color: #8ccbf7;
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
 .history-badge {
   background-color: #d58512;
   color: #fff;
@@ -66,7 +75,7 @@
 .captured-pieces {
   display: flex;
   align-items: center;
-  font-size: 1.35rem;
+  font-size: 1.3rem;
   color: #9e9c99;
   font-family: "Segoe UI Symbol", "Apple Color Emoji", "Arial Unicode MS", sans-serif;
 }
@@ -79,8 +88,76 @@
   font-family: monospace;
 }
 
+/* --- WRAPPER BARRA DI VALUTAZIONE + SCACCHIERA --- */
+.board-with-eval {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+}
+
+.eval-bar {
+  width: 26px;
+  flex-shrink: 0;
+  background-color: #3d3b38; /* Colore Nero/Grigio scuro stile Chess.com */
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end; /* Il Bianco cresce dal basso verso l'alto */
+  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.4);
+  user-select: none;
+}
+
+/* Se il giocatore gioca coi Neri, il Bianco si trova in alto */
+.eval-bar.flipped {
+  justify-content: flex-start;
+}
+
+.eval-bar-white {
+  width: 100%;
+  background-color: #f0f0f0;
+  transition: height 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.eval-score {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 0.68rem;
+  font-weight: 800;
+  font-family: monospace;
+  letter-spacing: -0.3px;
+  z-index: 2;
+  padding: 3px 0;
+}
+
+.eval-bar:not(.flipped) .score-white {
+  bottom: 3px;
+  color: #262421;
+}
+
+.eval-bar:not(.flipped) .score-black {
+  top: 3px;
+  color: #ffffff;
+}
+
+.eval-bar.flipped .score-white {
+  top: 3px;
+  color: #262421;
+}
+
+.eval-bar.flipped .score-black {
+  bottom: 3px;
+  color: #ffffff;
+}
+
 .board-container {
   position: relative;
+  flex: 1;
   width: 100%;
   aspect-ratio: 1 / 1;
   border-radius: 4px;
@@ -169,20 +246,98 @@
 
 /* --- COLONNA SIDEBAR --- */
 .sidebar-column {
-  width: 360px;
+  width: 370px;
   flex-shrink: 0;
   background-color: #262421;
   border-radius: 5px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  max-height: calc(78vh + 88px);
+  max-height: calc(80vh + 84px);
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
+}
+
+/* --- SELETTORE LEGGENDE (PUNTO C) --- */
+.legend-selector-panel {
+  padding: 10px 12px;
+  background-color: #1a1917;
+  border-bottom: 1px solid #302e2c;
+}
+
+.legend-panel-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #9e9c99;
+  margin-bottom: 8px;
+}
+
+.legend-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.legend-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background-color: #262421;
+  border: 1px solid #383531;
+  border-radius: 5px;
+  color: #dbd7d2;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.legend-card:hover {
+  background-color: #302e2a;
+  border-color: #524e48;
+}
+
+.legend-card.selected {
+  background-color: rgba(32, 110, 167, 0.22);
+  border-color: #2880c2;
+  color: #ffffff;
+}
+
+.legend-emoji {
+  font-size: 1.2rem;
+}
+
+.legend-meta {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.legend-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.legend-sub {
+  font-size: 0.68rem;
+  color: #8b8987;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.legend-active-desc {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: #7dc234;
+  font-style: italic;
 }
 
 /* --- TELEMETRIA RETE NEURALE --- */
 .telemetry-panel {
-  padding: 12px 14px;
+  padding: 10px 14px;
   background-color: #1e1d1a;
   border-bottom: 1px solid #302e2c;
 }
@@ -191,36 +346,64 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
   font-weight: 600;
   color: #dbd7d2;
   margin-bottom: 8px;
 }
 
+.telemetry-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-toggle {
+  background-color: #2c2a27;
+  border: 1px solid #3f3c38;
+  color: #9e9c99;
+  font-size: 0.74rem;
+  padding: 2px 7px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tool-toggle:hover {
+  color: #ffffff;
+  border-color: #5c5955;
+}
+
+.tool-toggle.active {
+  background-color: rgba(32, 110, 167, 0.25);
+  border-color: #206ea7;
+  color: #ffffff;
+}
+
 .confidence-pill {
   background-color: rgba(98, 153, 36, 0.2);
   color: #7dc234;
-  padding: 2px 8px;
+  padding: 2px 7px;
   border-radius: 4px;
   font-family: monospace;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 
 .candidate-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .candidate-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.85rem;
+  font-size: 0.83rem;
 }
 
 .candidate-san {
-  width: 48px;
+  width: 46px;
   font-weight: 600;
   color: #ffffff;
   font-family: "Segoe UI Symbol", sans-serif;
@@ -242,15 +425,15 @@
 }
 
 .candidate-prob {
-  width: 44px;
+  width: 42px;
   text-align: right;
   font-family: monospace;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: #9e9c99;
 }
 
 .telemetry-empty {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   color: #7b7875;
   font-style: italic;
 }
@@ -267,8 +450,8 @@
   background: transparent;
   border: none;
   color: #bababa;
-  padding: 9px 0;
-  font-size: 0.95rem;
+  padding: 8px 0;
+  font-size: 0.92rem;
   font-weight: bold;
   cursor: pointer;
   transition: background-color 0.1s;
@@ -288,7 +471,7 @@
 .move-list {
   flex: 1;
   overflow-y: auto;
-  font-size: 0.95rem;
+  font-size: 0.92rem;
 }
 
 .move-row {
@@ -305,8 +488,8 @@
 }
 
 .move-number {
-  width: 44px;
-  padding: 6px 0 6px 14px;
+  width: 42px;
+  padding: 5px 0 5px 14px;
   color: #7b7875;
   background-color: #21201d;
   user-select: none;
@@ -314,7 +497,7 @@
 
 .move-cell {
   flex: 1;
-  padding: 6px 12px;
+  padding: 5px 12px;
   cursor: pointer;
   color: #dbd7d2;
   font-family: "Segoe UI Symbol", "Apple Color Emoji", sans-serif;
@@ -332,27 +515,27 @@
 
 /* --- BARRA AZIONI E EXPORT --- */
 .action-bar {
-  padding: 12px;
+  padding: 10px 12px;
   background-color: #1e1d1a;
   border-top: 1px solid #302e2c;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
 }
 
 .action-row {
   display: flex;
-  gap: 8px;
+  gap: 7px;
 }
 
 .ctrl-btn, .export-btn {
   flex: 1;
-  padding: 8px 10px;
+  padding: 7px 9px;
   border-radius: 4px;
   border: 1px solid #3c3934;
   background-color: #302e2c;
   color: #dbd7d2;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
   transition: background-color 0.15s;
@@ -392,7 +575,6 @@
   cursor: grabbing;
 }
 
-/* Scrollbar */
 .move-list::-webkit-scrollbar {
   width: 8px;
 }
@@ -419,35 +601,6 @@
   .sidebar-column {
     width: 100%;
     max-width: 100%;
-    max-height: 380px;
+    max-height: 460px;
   }
-}
-
-/* --- PULSANTI AUDIO E FRECCE IA NELLA TELEMETRIA --- */
-.telemetry-tools {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tool-toggle {
-  background-color: #2c2a27;
-  border: 1px solid #3f3c38;
-  color: #9e9c99;
-  font-size: 0.75rem;
-  padding: 2px 7px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.tool-toggle:hover {
-  color: #ffffff;
-  border-color: #5c5955;
-}
-
-.tool-toggle.active {
-  background-color: rgba(32, 110, 167, 0.25);
-  border-color: #206ea7;
-  color: #ffffff;
 }

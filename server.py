@@ -5,8 +5,8 @@ from typing import Optional
 from inference import KasparovEngine
 
 app = FastAPI(
-    title="TorchFish Kasparov Hybrid API",
-    description="Policy Network di Kasparov + Ricerca Tattica Quiescente"
+    title="TorchFish Legends AlphaZero-MCTS API",
+    description="Motore MCTS PUCT Multi-Leggenda (Kasparov, Tal, Karpov, Carlsen)"
 )
 
 app.add_middleware(
@@ -17,9 +17,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inizializza il motore all'avvio del server
 engine = KasparovEngine(
     model_path="weights/kasparov_policy.pth",
+    value_model_path="best_chess_model.pth",
     dict_path="models/uci_dictionary.json",
     book_csv_path="data/gm_kasparov/kasparov_moves.csv"
 )
@@ -27,24 +27,33 @@ engine = KasparovEngine(
 
 class EvaluateRequest(BaseModel):
     fen: str
+    legend: Optional[str] = "kasparov"
     top_k: Optional[int] = 3
-    search_depth: Optional[int] = 2
+    num_simulations: Optional[int] = 64
 
 
-@app.get("/api/health")
-async def health_check():
-    return {"status": "ok", "device": str(engine.device)}
+@app.get("/api/legends")
+async def get_legends():
+    return {"legends": engine.get_legends_info()}
+
+
+@app.post("/api/eval_only")
+async def eval_only(req: EvaluateRequest):
+    try:
+        return engine.evaluate_only(fen=req.fen, legend=req.legend)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/evaluate")
 async def evaluate(req: EvaluateRequest):
     try:
-        result = engine.evaluate_position(
+        return engine.evaluate_position(
             fen=req.fen,
             top_k=req.top_k,
-            search_depth=req.search_depth
+            num_simulations=req.num_simulations,
+            legend=req.legend
         )
-        return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
