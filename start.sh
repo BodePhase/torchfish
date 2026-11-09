@@ -1,8 +1,17 @@
 #!/bin/bash
 
 # 1. Attiva il tuo ambiente conda (sostituisci 'torchfish' con il nome del tuo ambiente se ne usi uno già esistente)
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate torchfish
+#!/usr/bin/env bash
+set -e
+
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate torchfish
+elif [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+elif [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+fi
 
 echo "Avvio dell'API FastAPI in background..."
 # 2. Avvia il server Python. La '&' finale manda il processo in background senza bloccare il terminale
