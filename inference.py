@@ -6,9 +6,8 @@ import time
 from collections import deque
 import torch
 import torch.nn.functional as F
-import numpy as np
 import chess
-
+from dataset_policy import board_to_tensor as encode_board_tensor
 from models.policy_net import KasparovPolicyNet
 
 # Valori base per ordinamento mosse MVV-LVA
@@ -86,7 +85,6 @@ LEGENDS_PROFILES = {
         "style_desc": "Precisione universale, pressione nei finali",
         "weights_path": "weights/carlsen_policy.pth",
         "book_path": "data/gm_carlsen/carlsen_moves.csv",
-        "c_puct": 1.35,
         "style_bonus_cp": 22.0,
         "aggression": 1.05,
     },
@@ -287,11 +285,26 @@ class SearchTimeout(Exception):
     pass
 
 
+def _score_to_tt(score: int, ply: int) -> int:
+    if score > 90000:
+        return score + ply * 100
+    if score < -90000:
+        return score - ply * 100
+    return score
+
+
+def _score_from_tt(score: int, ply: int) -> int:
+    if score > 90000:
+        return score - ply * 100
+    if score < -90000:
+        return score + ply * 100
+    return score
+
+
 class KasparovEngine:
     def __init__(
         self,
         model_path: str = "weights/kasparov_policy.pth",
-        value_model_path: str = "best_chess_model.pth",
         dict_path: str = "models/uci_dictionary.json",
         book_csv_path: str = "data/gm_kasparov/kasparov_moves.csv"
     ):
@@ -326,21 +339,10 @@ class KasparovEngine:
 
         self.num_classes = len(self.move_to_idx)
 
-        # 2. Usa l'encoder originale di dataset_policy.py se presente
-        self.custom_fen_encoder = None
-        try:
-            import dataset_policy
-            for fn_name in ("fen_to_tensor", "board_to_tensor", "encode_board", "encode_fen"):
-                if hasattr(dataset_policy, fn_name):
-                    self.custom_fen_encoder = getattr(dataset_policy, fn_name)
-                    break
-        except Exception:
-            pass
-
-        # 3. Carica i modelli Policy per le Leggende
+        # 2. Carica i modelli Policy per le Leggende
         self.policy_models = {}
         self.opening_books = {}
-        self.policy_channels = 12
+        self.policy_channels = 14
 
         base_net = self._load_policy_model(model_path)
         self.policy_models["kasparov"] = base_net
@@ -358,7 +360,6 @@ class KasparovEngine:
             b_path = cfg["book_path"] if os.path.exists(cfg["book_path"]) else book_csv_path
             self.opening_books[legend_id] = self._load_book(b_path) if os.path.exists(b_path) else {}
 
-        self.value_net = None
         print(f"[TorchFish] Motore PeSTO Tapered + LMR/NMP + KasparovNet attivo su {self.device}.")
 
     def _load_policy_model(self, path: str):
@@ -367,7 +368,7 @@ class KasparovEngine:
         except TypeError:
             net = KasparovPolicyNet().to(self.device)
 
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
             net.load_state_dict(ckpt["model_state_dict"])
         else:
@@ -375,7 +376,7 @@ class KasparovEngine:
         net.eval()
 
         first_param = next(net.parameters())
-        self.policy_channels = first_param.shape[1] if first_param.ndim == 4 else 12
+        self.policy_channels = first_param.shape[1] if first_param.ndim == 4 else 14
         return net
 
     def _load_book(self, csv_path: str) -> dict:
@@ -389,8 +390,8 @@ class KasparovEngine:
                     if fen_key not in book:
                         book[fen_key] = {}
                     book[fen_key][uci] = book[fen_key].get(uci, 0) + 1
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[TorchFish] Avviso caricamento opening book ({csv_path}): {e}")
         return book
 
     def get_legends_info(self):
@@ -406,32 +407,10 @@ class KasparovEngine:
         ]
 
     def _board_to_tensor(self, board: chess.Board, channels: int) -> torch.Tensor:
-        if self.custom_fen_encoder is not None:
-            try:
-                t = self.custom_fen_encoder(board.fen())
-                if isinstance(t, np.ndarray):
-                    t = torch.from_numpy(t).float()
-                if t.shape[0] == channels:
-                    return t
-            except Exception:
-                pass
-
-        tensor = np.zeros((channels, 8, 8), dtype=np.float32)
-        piece_order = [
-            (chess.PAWN, chess.WHITE), (chess.KNIGHT, chess.WHITE), (chess.BISHOP, chess.WHITE),
-            (chess.ROOK, chess.WHITE), (chess.QUEEN, chess.WHITE), (chess.KING, chess.WHITE),
-            (chess.PAWN, chess.BLACK), (chess.KNIGHT, chess.BLACK), (chess.BISHOP, chess.BLACK),
-            (chess.ROOK, chess.BLACK), (chess.QUEEN, chess.BLACK), (chess.KING, chess.BLACK),
-        ]
-        for sq in chess.SQUARES:
-            piece = board.piece_at(sq)
-            if piece:
-                ch = piece_order.index((piece.piece_type, piece.color))
-                if ch < channels:
-                    tensor[ch, 7 - (sq // 8), sq % 8] = 1.0
-        if channels >= 13:
-            tensor[12, :, :] = 1.0 if board.turn == chess.WHITE else 0.0
-        return torch.from_numpy(tensor)
+        tensor = encode_board_tensor(board)
+        if tensor.shape[0] != channels:
+            return tensor[:channels]
+        return tensor
 
     # =========================================================================
     # VALUTAZIONE PeSTO TAPERED + BITBOARD PASSED PAWNS + MOP-UP ENDGAME
@@ -597,6 +576,9 @@ class KasparovEngine:
     def _order_moves(self, board: chess.Board, moves: list, tt_move: chess.Move, ply: int) -> list:
         killer_pair = self.killers.get(ply, (None, None))
         enemy = not board.turn
+        enemy_attacks_mask = 0
+        for sq in chess.SquareSet(board.occupied_co[enemy]):
+            enemy_attacks_mask |= board.attacks_mask(sq)
 
         def score_move(m: chess.Move) -> int:
             if m == tt_move:
@@ -615,9 +597,9 @@ class KasparovEngine:
             s = 0
             moving_pt = board.piece_type_at(m.from_square)
             if moving_pt and moving_pt != chess.KING:
-                if board.is_attacked_by(enemy, m.from_square):
+                if (enemy_attacks_mask >> m.from_square) & 1:
                     s += 600
-                if board.is_attacked_by(enemy, m.to_square):
+                if (enemy_attacks_mask >> m.to_square) & 1:
                     s -= 400
             return s
 
@@ -662,7 +644,8 @@ class KasparovEngine:
         tt_move = None
 
         if tt_entry is not None:
-            tt_depth, tt_flag, tt_score, tt_move = tt_entry
+            tt_depth, tt_flag, raw_tt_score, tt_move = tt_entry
+            tt_score = _score_from_tt(raw_tt_score, ply)
             if tt_depth >= depth and ply > 0:
                 if tt_flag == TT_EXACT:
                     return tt_score
@@ -752,7 +735,7 @@ class KasparovEngine:
 
         if len(self.tt) > 200000:
             self.tt.clear()
-        self.tt[pos_key] = (depth, tt_flag, best_val, best_move)
+        self.tt[pos_key] = (depth, tt_flag, _score_to_tt(best_val, ply), best_move)
 
         return best_val
 
@@ -803,8 +786,8 @@ class KasparovEngine:
         self,
         fen: str,
         top_k: int = 3,
-        num_simulations: int = 64,
-        legend: str = "kasparov"
+        legend: str = "kasparov",
+        history_fens: list = None
     ):
         legend_id = legend.lower() if legend.lower() in LEGENDS_PROFILES else "kasparov"
         profile = LEGENDS_PROFILES[legend_id]
@@ -828,6 +811,11 @@ class KasparovEngine:
             self.tt.clear()
         current_fen_key = " ".join(fen.split()[:4])
         self.recent_positions.append(current_fen_key)
+        seen_positions = (
+            {" ".join(f.split()[:4]) for f in history_fens if isinstance(f, str)}
+            if history_fens is not None
+            else set(self.recent_positions)
+        )
 
         legal_moves = list(board.legal_moves)
         ai_color = board.turn
@@ -896,7 +884,7 @@ class KasparovEngine:
                     if chess.square_file(move.from_square) in (2, 3, 4):
                         adj += 16.0
 
-            if next_fen_key in self.recent_positions:
+            if next_fen_key in seen_positions:
                 adj -= 120.0
 
             board.pop()
@@ -925,17 +913,11 @@ class KasparovEngine:
             try:
                 for idx, move in enumerate(ordered_root_moves):
                     board.push(move)
-
-                    if idx < top_k or best_tactical_so_far < -50000:
-                        opp_beta = 999999
-                    else:
-                        opp_beta = -(best_tactical_so_far - 200)
-
                     val = -self._negamax(
                         board,
                         depth=current_depth,
                         alpha=-999999,
-                        beta=max(-999998, opp_beta),
+                        beta=999999,
                         ply=1
                     )
                     board.pop()
@@ -944,12 +926,8 @@ class KasparovEngine:
                     if val > best_tactical_so_far:
                         best_tactical_so_far = val
             except SearchTimeout:
-                board = chess.Board(fen)
                 completed_iteration = False
-                # Se abbiamo già valutato le mosse principali prima del timeout, aggiorna quelle completate
-                if len(new_tactical_scores) >= top_k:
-                    for m, v in new_tactical_scores.items():
-                        tactical_scores[m] = v
+                board = chess.Board(fen)
                 break
 
             if completed_iteration:
