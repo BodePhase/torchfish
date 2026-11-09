@@ -4,6 +4,7 @@ import { Chess } from 'chess.js';
 import './App.css';
 
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const PIECE_SYMBOLS = {
   w: { p: '♙', n: '♘', b: '♗', r: '♖', q: '♕', k: '♔' },
@@ -159,6 +160,7 @@ export default function App() {
   const [resignedWinner, setResignedWinner] = useState(null);
   const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [], isBook: false });
   const [copiedBadge, setCopiedBadge] = useState(null);
+  const [apiError, setApiError] = useState(null);
 
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAIArrows, setShowAIArrows] = useState(false);
@@ -252,7 +254,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [snapshots, playMoveSound]);
 
-  const makeAIMove = useCallback(async (currentFen, legendToUse = selectedLegend) => {
+  const makeAIMove = useCallback(async (currentFen, legendToUse = selectedLegend, historyFens = []) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -260,13 +262,22 @@ export default function App() {
     abortControllerRef.current = controller;
 
     setKasparovThinking(true);
+    setApiError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/evaluate', {
+      const response = await fetch(`${API_BASE}/api/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fen: currentFen, legend: legendToUse }),
+        body: JSON.stringify({
+          fen: currentFen,
+          legend: legendToUse,
+          history_fens: historyFens
+        }),
         signal: controller.signal,
       });
+
+      if (!response.ok) {
+        throw new Error(`Errore server (${response.status})`);
+      }
 
       const data = await response.json();
       await new Promise((r) => setTimeout(r, 380));
@@ -311,6 +322,7 @@ export default function App() {
     } catch (error) {
       if (error.name !== 'AbortError') {
         console.error('Errore API:', error);
+        setApiError('Connessione al motore backend non riuscita (verifica server.py sulla porta 8000).');
       }
     } finally {
       if (!controller.signal.aborted) {
@@ -333,12 +345,12 @@ export default function App() {
       const isCheckmateNow = masterGameRef.current.isCheckmate?.() ?? masterGameRef.current.in_checkmate?.();
       const userMate = isCheckmateNow ? (masterGameRef.current.turn() === 'w' ? -1 : 1) : null;
 
-      // Stima immediata basata sul materiale finché il server non risponde
       const matNow = calculateMaterial(masterGameRef.current);
       const quickEval = Number(((matNow.whiteAdvantage - matNow.blackAdvantage) || 0).toFixed(1));
 
       playMoveSound(moveObj, masterGameRef.current);
 
+      let historyFensForAI = [];
       setSnapshots((prev) => {
         const next = [
           ...prev,
@@ -352,9 +364,30 @@ export default function App() {
             mateIn: userMate
           }
         ];
+        historyFensForAI = next.slice(-16).map((s) => s.fen);
         setViewIndex(next.length - 1);
         return next;
       });
+
+      // Aggiorna la Eval Bar con la valutazione di quiescenza reale subito dopo la mossa utente
+      if (!userMate) {
+        fetch(`${API_BASE}/api/eval_only`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fen: newFen, legend: selectedLegend }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((evalData) => {
+            if (evalData && typeof evalData.eval_white === 'number') {
+              setSnapshots((prev) =>
+                prev.map((snap) =>
+                  snap.fen === newFen ? { ...snap, evalWhite: evalData.eval_white } : snap
+                )
+              );
+            }
+          })
+          .catch(() => {});
+      }
 
       setMoveFrom(null);
       setPendingPromotion(null);
@@ -362,7 +395,7 @@ export default function App() {
 
       const isOver = masterGameRef.current.isGameOver?.() ?? masterGameRef.current.game_over?.();
       if (!isOver) {
-        setTimeout(() => makeAIMove(newFen, selectedLegend), 40);
+        setTimeout(() => makeAIMove(newFen, selectedLegend, historyFensForAI), 40);
       }
       return true;
     } catch {
@@ -459,10 +492,11 @@ export default function App() {
     setPendingPromotion(null);
     setRightClickedSquares({});
     setResignedWinner(null);
+    setApiError(null);
     setTelemetry({ confidence: null, topMoves: [], isBook: false });
 
     if (color === 'b') {
-      setTimeout(() => makeAIMove(INITIAL_FEN, legendId), 150);
+      setTimeout(() => makeAIMove(INITIAL_FEN, legendId, [INITIAL_FEN]), 150);
     }
   };
 
@@ -570,7 +604,7 @@ export default function App() {
             <span className="status-dot" data-thinking={kasparovThinking} />
             <span>
               {kasparovThinking
-                ? `🧠 ${activeLegendObj.name} sta calcolando (MCTS)...`
+                ? `🧠 ${activeLegendObj.name} sta calcolando (Alpha-Beta)...`
                 : `${activeLegendObj.badge} ${activeLegendObj.name} (${activeLegendObj.title})`}
             </span>
             {telemetry.isBook && !kasparovThinking && (
@@ -584,6 +618,10 @@ export default function App() {
             {aiAdvantage > 0 && <span className="advantage">+{aiAdvantage}</span>}
           </div>
         </div>
+        
+        {apiError && (
+          <div className="api-error-banner" role="alert">{apiError}</div>
+        )}
 
         {/* WRAPPER: BARRA DI VALUTAZIONE A SINISTRA + SCACCHIERA A DESTRA */}
         <div className="board-with-eval">
@@ -687,10 +725,10 @@ export default function App() {
           <div className="legend-active-desc">{activeLegendObj.desc}</div>
         </div>
 
-        {/* TELEMETRIA MCTS + POLICY NET */}
+        {/* TELEMETRIA ALPHA-BETA + POLICY NET */}
         <div className="telemetry-panel">
           <div className="telemetry-header">
-            <span>⚡ MCTS + Policy</span>
+            <span>⚡ Alpha-Beta + Policy</span>
             <div className="telemetry-tools">
               <button
                 className={`tool-toggle ${showAIArrows ? 'active' : ''}`}
@@ -728,7 +766,7 @@ export default function App() {
             </div>
           ) : (
             <div className="telemetry-empty">
-              Seleziona una Leggenda o muovi un pezzo per avviare l&apos;analisi MCTS
+              Seleziona una Leggenda o muovi un pezzo per avviare l&apos;analisi ibrida
             </div>
           )}
         </div>
@@ -783,12 +821,20 @@ export default function App() {
               <span
                 className={`move-cell ${viewIndex === pair.white.index ? 'active-move' : ''}`}
                 onClick={() => setViewIndex(pair.white.index)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.white.index)}
               >
                 {formatMoveToFigurine(pair.white.san)}
               </span>
               <span
                 className={`move-cell ${pair.black && viewIndex === pair.black.index ? 'active-move' : ''}`}
                 onClick={() => pair.black && setViewIndex(pair.black.index)}
+                role={pair.black ? 'button' : undefined}
+                tabIndex={pair.black ? 0 : undefined}
+                onKeyDown={(e) =>
+                  pair.black && (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.black.index)
+                }
               >
                 {pair.black ? formatMoveToFigurine(pair.black.san) : ''}
               </span>
