@@ -2,7 +2,7 @@
 
 ## 1. Descrizione del progetto
 
-**TorchFish** è un motore scacchistico ibrido e un'applicazione web full-stack progettata per riprodurre lo stile di gioco dei Grandi Maestri (a partire da Garry Kasparov) combinando Deep Learning e ricerca tattica classica. Il sistema unisce l'intuito posizionale di una Policy Network convoluzionale in PyTorch con il calcolo rigoroso di un motore Alpha-Beta (Negamax con Quiescence Search e valutazione PeSTO Tapered). L'applicazione include un'interfaccia grafica reattiva in stile Lichess/Chess.com con telemetria neurale in tempo reale, barra di valutazione e selettore di profili storici.
+**TorchFish** è un motore scacchistico ibrido e un'applicazione web full-stack progettata per riprodurre lo stile di gioco dei Grandi Maestri (a partire da Garry Kasparov) combinando Deep Learning e ricerca tattica classica. Il sistema unisce l'intuito posizionale di una Policy Network convoluzionale in PyTorch con il calcolo rigoroso di un motore Alpha-Beta (Negamax con Quiescence Search, LMR, Null Move Pruning e valutazione PeSTO Tapered). L'applicazione include un'interfaccia grafica reattiva in stile Lichess/Chess.com con telemetria neurale in tempo reale, barra di valutazione e selettore di profili storici.
 
 ---
 
@@ -10,7 +10,7 @@
 
 ### Requisiti di sistema
 * **Python:** versione 3.10+ (consigliato il supporto CUDA per l'inferenza e il training su GPU PyTorch).
-* **Librerie Python:** `torch`, `numpy`, `chess` (`python-chess`), `fastapi`, `uvicorn`, `tqdm`.
+* **Librerie Python:** `torch` (>= 2.15.0 raccomandato), `numpy`, `pandas`, `python-chess`, `fastapi`, `uvicorn`, `pydantic`, `tqdm`, `pytest`, `httpx`.
 * **Node.js e npm:** Node.js 18+ per l'esecuzione del frontend React/Vite (`torchfish-ui`).
 
 ### Guida all'installazione e all'avvio
@@ -26,41 +26,34 @@
    python -m venv venv
    source venv/bin/activate  # Su Windows: venv\Scripts\activate
    pip install -r requirements.txt
-   pip install fastapi uvicorn tqdm chess numpy torch
    ```
 
-3. **(Opzionale) Generare il dataset tattico anti-blunder ed eseguire il fine-tuning della rete:**
+3. **Eseguire i test di integrità del motore (Opzionale ma consigliato):**
    ```bash
-   python augment_tactics.py
-   python finetune_policy.py
+   pytest -v tests/test_engine.py
    ```
 
-4. **Avviare il server backend (FastAPI + Motore TorchFish):**
+4. **Avviare in parallelo il server backend e l'interfaccia web React:**
+   È possibile avviare tutto con lo script bash dedicato:
    ```bash
-   python server.py
+   ./start.sh
    ```
-   Il backend resterà in ascolto all'indirizzo `http://localhost:8000`.
-
-5. **Installare le dipendenze e avviare l'interfaccia web React:**
-   Aprire un secondo terminale nella radice del progetto ed eseguire:
-   ```bash
-   cd torchfish-ui
-   npm install
-   npm run dev
-   ```
+   In alternativa (avvio manuale):
+   * Terminale 1 (Backend): python server.py (in ascolto su http://localhost:8000)
+   * Terminale 2 (Frontend): cd torchfish-ui && npm install && npm run dev
 
 ### Esempio di utilizzo
-Una volta avviati entrambi i servizi, aprire il browser all'URL mostrato da Vite (solitamente `http://localhost:5173`). Dalla barra laterale destra è possibile selezionare il profilo del Grande Maestro avversario (*Kasparov*, *Tal*, *Karpov*, *Carlsen*), attivare la visualizzazione delle frecce candidate dell'IA sulla scacchiera (`🎯 Frecce IA`), navigare nello storico delle mosse tramite tastiera o pulsanti dedicati ed esportare la partita in formato `FEN` o `PGN`.
+Una volta avviati entrambi i servizi, aprire il browser all'URL mostrato da Vite (solitamente http://localhost:5173). Dalla barra laterale è possibile selezionare il profilo del Grande Maestro avversario (Kasparov, Tal, Karpov, Carlsen), attivare la visualizzazione delle frecce candidate dell'IA sulla scacchiera (🎯 Frecce IA), navigare nello storico delle mosse tramite tastiera ed esplorare l'albero decisionale del motore (telemetria Alpha-Beta).
 
 ---
 
 ## 3. Caratteristiche tecniche
 
 ### Architettura Ibrida: Policy Network e Ricerca Tattica
-Una Policy Network pura addestrata per *Behavioral Cloning* predice le mosse sulla base di pattern geometrici ma è priva di calcolo concreto (*0-ply lookahead*), risultando vulnerabile a sviste tattiche in posizioni fuori distribuzione. TorchFish risolve questo limite integrando due livelli:
-* **`KasparovPolicyNet` (PyTorch):** Rete neurale convoluzionale che mappa lo stato della scacchiera in una distribuzione di probabilità Softmax su un dizionario di **4544 mosse UCI** (`models/uci_dictionary.json`), fornendo i *prior* posizionali alla radice.
-* **Synthetic Blunder Injection (`augment_tactics.py`):** Pipeline di data augmentation che arricchisce le 81.700 posizioni storiche di Kasparov con 25.000 posizioni tattiche sintetiche (matti in 1 e catture di pezzi lasciati indifesi), seguita da un fine-tuning mirato (`finetune_policy.py`).
-* **Meccanismo *Blunder Lock*:** Alla radice, i bonus stilistici della rete neurale e dell'Opening Book vengono applicati solo alle mosse tatticamente sane; se una mossa perde $\ge 85$ centipawn rispetto alla migliore variante calcolata dal motore Alpha-Beta, i bonus di stile vengono azzerati per impedire errori materiali.
+Una Policy Network pura addestrata per Behavioral Cloning predice le mosse sulla base di pattern geometrici, ma risulta vulnerabile a sviste tattiche in posizioni fuori distribuzione. TorchFish risolve questo limite integrando due livelli:
+* **`KasparovPolicyNet` (PyTorch):** Rete neurale convoluzionale (Tensore di input 14x8x8) che mappa lo stato della scacchiera in una distribuzione di probabilità Softmax su un dizionario di 4544 mosse UCI (models/uci_dictionary.json), fornendo i prior posizionali alla radice.
+* **Synthetic Blunder Injection (`augment_tactics.py`):** Pipeline di data augmentation che arricchisce i dataset storici con posizioni tattiche sintetiche (matti in 1 e catture di pezzi lasciati indifesi), consolidando i riflessi anti-blunder tramite fine-tuning.
+* **Meccanismo *Blunder Lock*:** Alla radice, i bonus stilistici della rete neurale e dell'Opening Book vengono applicati solo alle mosse tatticamente sane; se una mossa perde $\ge 85$ centipawn rispetto alla migliore variante calcolata dal motore Alpha-Beta, i bonus di stile vengono azzerati per impedire la perdita di materiale a fini "stilistici".
 
 ### Algoritmo di ricerca
 Il motore tattico (`inference.py`) implementa un albero di ricerca **Iterative Deepening Negamax** con le seguenti tecniche di potatura ed estensione:
