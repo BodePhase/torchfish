@@ -88,6 +88,16 @@
   font-family: monospace;
 }
 
+.api-error-banner {
+  background-color: rgba(176, 58, 48, 0.25);
+  border: 1px solid #b03a30;
+  color: #ffb3ab;
+  font-size: 0.82rem;
+  padding: 6px 12px;
+  margin: 0 0 8px 36px;
+  border-radius: 4px;
+}
+
 /* --- WRAPPER BARRA DI VALUTAZIONE + SCACCHIERA --- */
 .board-with-eval {
   display: flex;
