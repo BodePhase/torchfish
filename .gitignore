@@ -22,4 +22,6 @@ torchfish-ui/dist/
 .env
 
 # Repomix output
-repomix-output.xml
+repomix-output*.xml
+
+.pytest_cache/
