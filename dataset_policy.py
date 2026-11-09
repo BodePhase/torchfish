@@ -5,20 +5,43 @@ import chess
 import json
 import os
 
+PIECE_TO_CHANNEL = {
+    chess.PAWN: 0,
+    chess.KNIGHT: 1,
+    chess.BISHOP: 2,
+    chess.ROOK: 3,
+    chess.QUEEN: 4,
+    chess.KING: 5
+}
+
+
+def board_to_tensor(board: chess.Board) -> torch.Tensor:
+    """Converte una chess.Board nel tensore [14, 8, 8] usato da KasparovPolicyNet."""
+    tensor = torch.zeros((14, 8, 8), dtype=torch.float32)
+
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece:
+            channel = PIECE_TO_CHANNEL[piece.piece_type]
+            if not piece.color:
+                channel += 6
+
+            row = chess.square_rank(square)
+            col = chess.square_file(square)
+            tensor[channel, row, col] = 1.0
+
+    if board.turn == chess.WHITE:
+        tensor[12, :, :] = 1.0
+
+    return tensor
+
+
 class KasparovPolicyDataset(Dataset):
     def __init__(self, csv_file, dict_file="models/uci_dictionary.json"):
         # Carica le partite di Kasparov
         self.data = pd.read_csv(csv_file)
-        
-        # Mappatura standard dei pezzi (identica alla Value Network)
-        self.piece_to_channel = {
-            chess.PAWN: 0,
-            chess.KNIGHT: 1,
-            chess.BISHOP: 2,
-            chess.ROOK: 3,
-            chess.QUEEN: 4,
-            chess.KING: 5
-        }
+
+        self.piece_to_channel = PIECE_TO_CHANNEL
         
         # Carica il vocabolario JSON generato da vocabulary.py
         if not os.path.exists(dict_file):
@@ -32,24 +55,7 @@ class KasparovPolicyDataset(Dataset):
         return len(self.data)
 
     def board_to_tensor(self, board):
-        # Tensore [14, 8, 8] - Identico all'altra rete per mantenere coerenza
-        tensor = torch.zeros((14, 8, 8), dtype=torch.float32)
-        
-        for square in chess.SQUARES:
-            piece = board.piece_at(square)
-            if piece:
-                channel = self.piece_to_channel[piece.piece_type]
-                if not piece.color: 
-                    channel += 6
-                
-                row = chess.square_rank(square)
-                col = chess.square_file(square)
-                tensor[channel, row, col] = 1.0
-
-        if board.turn == chess.WHITE:
-            tensor[12, :, :] = 1.0
-
-        return tensor
+        return board_to_tensor(board)
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
