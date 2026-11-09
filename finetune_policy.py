@@ -26,7 +26,7 @@ def finetune():
         model = KasparovPolicyNet().to(device)
 
     # Carica i pesi originali
-    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
