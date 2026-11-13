@@ -1,4 +1,4 @@
-/* App.css - Stile Lichess/Chess.com con Eval Bar e Selettore Leggende */
+/* App.css - Stile Lichess/Chess.com con Eval Bar, Game Review e Selettore Leggende */
 
 .lichess-container {
   display: flex;
@@ -29,7 +29,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 4px 8px 36px; /* Allineato al bordo sinistro della scacchiera dopo la Eval Bar */
+  padding: 8px 4px 8px 36px;
   font-size: 1.02rem;
   color: #ffffff;
 }
@@ -110,18 +110,17 @@
 .eval-bar {
   width: 26px;
   flex-shrink: 0;
-  background-color: #3d3b38; /* Colore Nero/Grigio scuro stile Chess.com */
+  background-color: #3d3b38;
   border-radius: 3px;
   overflow: hidden;
   position: relative;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end; /* Il Bianco cresce dal basso verso l'alto */
+  justify-content: flex-end;
   box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.4);
   user-select: none;
 }
 
-/* Se il giocatore gioca coi Neri, il Bianco si trova in alto */
 .eval-bar.flipped {
   justify-content: flex-start;
 }
@@ -256,7 +255,7 @@
 
 /* --- COLONNA SIDEBAR --- */
 .sidebar-column {
-  width: 370px;
+  width: 380px;
   flex-shrink: 0;
   background-color: #262421;
   border-radius: 5px;
@@ -267,33 +266,33 @@
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
 }
 
-/* --- SELETTORE LEGGENDE (PUNTO C) --- */
+/* --- SELETTORE LEGGENDE --- */
 .legend-selector-panel {
-  padding: 10px 12px;
+  padding: 8px 12px;
   background-color: #1a1917;
   border-bottom: 1px solid #302e2c;
 }
 
 .legend-panel-label {
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: #9e9c99;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .legend-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: 5px;
 }
 
 .legend-card {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 7px;
+  padding: 5px 8px;
   background-color: #262421;
   border: 1px solid #383531;
   border-radius: 5px;
@@ -315,7 +314,7 @@
 }
 
 .legend-emoji {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
 }
 
 .legend-meta {
@@ -325,13 +324,13 @@
 }
 
 .legend-name {
-  font-size: 0.82rem;
+  font-size: 0.8rem;
   font-weight: 700;
   line-height: 1.1;
 }
 
 .legend-sub {
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   color: #8b8987;
   white-space: nowrap;
   overflow: hidden;
@@ -339,15 +338,15 @@
 }
 
 .legend-active-desc {
-  margin-top: 6px;
-  font-size: 0.75rem;
+  margin-top: 5px;
+  font-size: 0.73rem;
   color: #7dc234;
   font-style: italic;
 }
 
-/* --- TELEMETRIA RETE NEURALE --- */
+/* --- TELEMETRIA RETE NEURALE & PRINCIPAL VARIATION --- */
 .telemetry-panel {
-  padding: 10px 14px;
+  padding: 8px 12px;
   background-color: #1e1d1a;
   border-bottom: 1px solid #302e2c;
 }
@@ -356,10 +355,10 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
   font-weight: 600;
   color: #dbd7d2;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .telemetry-tools {
@@ -372,7 +371,7 @@
   background-color: #2c2a27;
   border: 1px solid #3f3c38;
   color: #9e9c99;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   padding: 2px 7px;
   border-radius: 4px;
   cursor: pointer;
@@ -396,7 +395,7 @@
   padding: 2px 7px;
   border-radius: 4px;
   font-family: monospace;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
 }
 
 .candidate-list {
@@ -405,11 +404,16 @@
   gap: 5px;
 }
 
+.candidate-item {
+  display: flex;
+  flex-direction: column;
+}
+
 .candidate-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.83rem;
+  font-size: 0.81rem;
 }
 
 .candidate-san {
@@ -438,14 +442,101 @@
   width: 42px;
   text-align: right;
   font-family: monospace;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   color: #9e9c99;
 }
 
+.telemetry-pv {
+  display: block;
+  font-size: 0.71rem;
+  color: #8c8881;
+  font-family: monospace;
+  margin-left: 54px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .telemetry-empty {
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   color: #7b7875;
   font-style: italic;
+}
+
+/* --- PANNELLO GAME REVIEW (GRAFICO SVG + PRECISIONE) --- */
+.review-panel {
+  padding: 6px 12px;
+  background-color: #1b1a18;
+  border-bottom: 1px solid #302e2c;
+}
+
+.eval-graph-container {
+  background: #141311;
+  border: 1px solid #2e2c29;
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.eval-graph-svg {
+  display: block;
+  width: 100%;
+  height: 54px;
+}
+
+.eval-zero-line {
+  stroke: #3a3733;
+  stroke-width: 1;
+  stroke-dasharray: 3, 3;
+}
+
+.eval-area-fill {
+  fill: rgba(59, 149, 214, 0.2);
+}
+
+.eval-line-stroke {
+  stroke: #3b95d6;
+  stroke-width: 1.8;
+}
+
+.eval-cursor-line {
+  stroke: #ffffff;
+  stroke-width: 1;
+  opacity: 0.75;
+}
+
+.eval-cursor-dot {
+  fill: #ffffff;
+  stroke: #206ea7;
+  stroke-width: 1.5;
+}
+
+.accuracy-summary {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.acc-box {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.acc-box.white {
+  background: #e8e6e3;
+  color: #161512;
+}
+
+.acc-box.black {
+  background: #262421;
+  color: #e8e6e3;
+  border: 1px solid #3a3733;
 }
 
 /* --- PULSANTIERA NAVIGAZIONE STORICO --- */
@@ -460,8 +551,8 @@
   background: transparent;
   border: none;
   color: #bababa;
-  padding: 8px 0;
-  font-size: 0.92rem;
+  padding: 6px 0;
+  font-size: 0.9rem;
   font-weight: bold;
   cursor: pointer;
   transition: background-color 0.1s;
@@ -477,11 +568,12 @@
   cursor: default;
 }
 
-/* --- CRONOLOGIA MOSSE --- */
+/* --- CRONOLOGIA MOSSE & BADGE QUALITÀ --- */
 .move-list {
   flex: 1;
+  min-height: 85px;
   overflow-y: auto;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
 }
 
 .move-row {
@@ -498,8 +590,8 @@
 }
 
 .move-number {
-  width: 42px;
-  padding: 5px 0 5px 14px;
+  width: 38px;
+  padding: 4px 0 4px 12px;
   color: #7b7875;
   background-color: #21201d;
   user-select: none;
@@ -507,7 +599,10 @@
 
 .move-cell {
   flex: 1;
-  padding: 5px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 10px;
   cursor: pointer;
   color: #dbd7d2;
   font-family: "Segoe UI Symbol", "Apple Color Emoji", sans-serif;
@@ -523,29 +618,150 @@
   font-weight: bold;
 }
 
-/* --- BARRA AZIONI E EXPORT --- */
+.move-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  font-family: monospace;
+}
+
+.badge-best { background: rgba(129, 182, 76, 0.22); color: #81b64c; }
+.badge-good { background: rgba(150, 175, 130, 0.18); color: #96af82; }
+.badge-inaccuracy { background: rgba(240, 193, 92, 0.22); color: #f0c15c; }
+.badge-mistake { background: rgba(230, 145, 44, 0.22); color: #e6912c; }
+.badge-blunder { background: rgba(202, 52, 49, 0.28); color: #fa412d; }
+
+/* --- BARRA AZIONI, SCONTRO LEGGENDE E IMPORT/EXPORT --- */
 .action-bar {
-  padding: 10px 12px;
+  padding: 8px 12px;
   background-color: #1e1d1a;
   border-top: 1px solid #302e2c;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
+}
+
+.spectator-controls {
+  background: #161512;
+  border: 1px solid #302e2b;
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+
+.spectator-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #dbd7d2;
+  margin-bottom: 5px;
+}
+
+.btn-spectator {
+  background: #2c2a27;
+  color: #e8e6e3;
+  border: 1px solid #45423e;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 0.73rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-spectator:hover:not(:disabled) {
+  border-color: #629924;
+  color: #ffffff;
+}
+
+.btn-spectator.active {
+  background: #629924;
+  color: #ffffff;
+  border-color: #7dc234;
+  font-weight: 700;
+}
+
+.btn-spectator:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.spectator-selectors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spectator-selectors select {
+  flex: 1;
+  background: #262421;
+  color: #e8e6e3;
+  border: 1px solid #383531;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 0.75rem;
+}
+
+.vs-label {
+  font-size: 0.72rem;
+  color: #8c8881;
+  font-weight: 700;
+}
+
+.fen-import-bar {
+  display: flex;
+  gap: 5px;
+}
+
+.fen-import-bar input {
+  flex: 1;
+  background: #161512;
+  color: #e8e6e3;
+  border: 1px solid #363431;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+}
+
+.fen-import-bar button {
+  background: #302e2b;
+  color: #dbd7d2;
+  border: 1px solid #45423e;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fen-import-bar button:hover {
+  background: #3e3b38;
+  color: #ffffff;
+}
+
+.fen-error {
+  color: #fa412d;
+  font-size: 0.72rem;
+  align-self: center;
+  white-space: nowrap;
 }
 
 .action-row {
   display: flex;
-  gap: 7px;
+  gap: 6px;
 }
 
 .ctrl-btn, .export-btn {
   flex: 1;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border-radius: 4px;
   border: 1px solid #3c3934;
   background-color: #302e2c;
   color: #dbd7d2;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
   transition: background-color 0.15s;
@@ -611,6 +827,6 @@
   .sidebar-column {
     width: 100%;
     max-width: 100%;
-    max-height: 460px;
+    max-height: none;
   }
 }

@@ -110,7 +110,7 @@ _RAW_MG_PST = {
          -47,  60,  37,  65,  84, 129,  73,   44,
           -9,  17,  19,  53,  37,  69,  18,   22,
          -13,   4,  16,  13,  28,  19,  21,   -8,
-         -23,  -9,  12,  10,  19,  17,  25,  -16,
+         -23, -9,  12,  10,  19,  17,  25,  -16,
          -29, -53, -12,  -3,  -1,  18, -14,  -19,
         -105, -21, -58, -33, -17, -28, -19,  -23,
     ],
@@ -213,7 +213,7 @@ _RAW_EG_PST = {
          10,  17,  23,  15,  20,  45,  44,  13,
          -8,  22,  24,  27,  26,  33,  26,   3,
         -18,  -4,  21,  24,  27,  23,   9, -11,
-        -19,  -3,  11,  21,  23,  16,   7,  -9,
+        -19,  -3,  11,  21,  23,  16,   7, -9,
         -27, -11,   4,  13,  14,   4,  -5, -17,
         -53, -34, -21, -11, -28, -14, -24, -43,
     ],
@@ -763,6 +763,56 @@ class KasparovEngine:
             priors[move] /= norm
         return priors
 
+    def _extract_pv_san(self, board: chess.Board, first_move: chess.Move, max_ply: int = 5) -> str:
+        """
+        Estrae la Principal Variation (PV) in notazione SAN seguendo le mosse
+        della Transposition Table (self.tt) fino a max_ply semimosse.
+        Garantisce il ripristino dello stato di board tramite blocco finally.
+        """
+        pv_sans = []
+        pushed_count = 0
+        visited_keys = set()
+
+        try:
+            if first_move not in board.legal_moves:
+                return ""
+
+            pv_sans.append(board.san(first_move))
+            board.push(first_move)
+            pushed_count += 1
+
+            for _ in range(max_ply - 1):
+                if board.is_game_over():
+                    break
+
+                tt_key = getattr(board, "_transposition_key", board.fen)()
+                if tt_key in visited_keys:
+                    break
+                visited_keys.add(tt_key)
+
+                tt_entry = self.tt.get(tt_key)
+                if not tt_entry:
+                    break
+
+                if isinstance(tt_entry, dict):
+                    next_move = tt_entry.get("best_move") or tt_entry.get("move")
+                elif isinstance(tt_entry, (tuple, list)) and len(tt_entry) >= 4:
+                    next_move = tt_entry[3]
+                else:
+                    next_move = None
+
+                if next_move is None or next_move not in board.legal_moves:
+                    break
+
+                pv_sans.append(board.san(next_move))
+                board.push(next_move)
+                pushed_count += 1
+        finally:
+            for _ in range(pushed_count):
+                board.pop()
+
+        return " ".join(pv_sans)
+
     def evaluate_only(self, fen: str, legend: str = "kasparov") -> dict:
         board = chess.Board(fen)
         if board.is_checkmate():
@@ -832,7 +882,7 @@ class KasparovEngine:
                     "best_move_san": san,
                     "best_move_uci": move.uci(),
                     "confidence": 100.0,
-                    "top_moves": [{"san": san, "uci": move.uci(), "prob": 100.0}],
+                    "top_moves": [{"san": san, "uci": move.uci(), "pv_san": san, "prob": 100.0}],
                     "is_book_move": False,
                     "legend": legend_id,
                     "eval_white": 99.0 if ai_is_white else -99.0,
@@ -963,6 +1013,7 @@ class KasparovEngine:
             eval_white_pawns = round((t_cp if ai_is_white else -t_cp) / 100.0, 2)
 
             scored_moves.append({
+                "move_obj": move,
                 "san": san,
                 "uci": uci,
                 "tactical_cp": t_cp,
@@ -975,7 +1026,7 @@ class KasparovEngine:
         scored_moves.sort(key=lambda x: x["score"], reverse=True)
         top_slice = scored_moves[:top_k]
 
-        best_move_obj = chess.Move.from_uci(top_slice[0]["uci"])
+        best_move_obj = top_slice[0]["move_obj"]
         board.push(best_move_obj)
         self.recent_positions.append(" ".join(board.fen().split()[:4]))
         board.pop()
@@ -988,6 +1039,7 @@ class KasparovEngine:
             {
                 "san": m["san"],
                 "uci": m["uci"],
+                "pv_san": self._extract_pv_san(board, m["move_obj"], max_ply=5),
                 "prob": round((e_val / sum_exps) * 100, 1),
                 "eval_white": m["eval_white"]
             }

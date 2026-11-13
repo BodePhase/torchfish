@@ -97,6 +97,105 @@ const formatMoveToFigurine = (san) => {
     .replace(/K/g, '♔');
 };
 
+// Converte centipawns o mateIn in Probabilità di Vittoria del Bianco (0..100%)
+const evalToWinProbWhite = (evalWhite = 0, mateIn = null) => {
+  if (mateIn !== null && mateIn !== undefined && mateIn !== 0) {
+    return mateIn > 0 ? 100 : 0;
+  }
+  const cp = (evalWhite || 0) * 100;
+  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
+};
+
+// Classifica ogni mossa confrontando lo snapshot precedente con quello attuale
+const analyzeMoveHistory = (snapshots) => {
+  const annotations = [null];
+  const whiteAccs = [];
+  const blackAccs = [];
+
+  for (let i = 1; i < snapshots.length; i++) {
+    const prev = snapshots[i - 1];
+    const curr = snapshots[i];
+
+    const prevTurn = (prev.fen.split(' ')[1] || 'w');
+    const isWhiteMove = prevTurn === 'w';
+
+    const winBefore = evalToWinProbWhite(prev.evalWhite, prev.mateIn);
+    const winAfter = evalToWinProbWhite(curr.evalWhite, curr.mateIn);
+
+    const winLoss = Math.max(0, isWhiteMove ? winBefore - winAfter : winAfter - winBefore);
+    const moveAcc = Math.max(0, Math.min(100, 103.1668 * Math.exp(-0.04354 * winLoss) - 3.1669));
+
+    if (isWhiteMove) whiteAccs.push(moveAcc);
+    else blackAccs.push(moveAcc);
+
+    let badge = { symbol: '★', label: 'Migliore', className: 'badge-best' };
+    if (winLoss >= 20) {
+      badge = { symbol: '??', label: 'Grave errore (Blunder)', className: 'badge-blunder' };
+    } else if (winLoss >= 10) {
+      badge = { symbol: '?', label: 'Errore', className: 'badge-mistake' };
+    } else if (winLoss >= 5) {
+      badge = { symbol: '?!', label: 'Imprecisione', className: 'badge-inaccuracy' };
+    } else if (winLoss > 1.5) {
+      badge = { symbol: '✓', label: 'Buona mossa', className: 'badge-good' };
+    }
+
+    annotations.push({ ...badge, winLoss: winLoss.toFixed(1), accuracy: moveAcc });
+  }
+
+  const avg = (arr) => (arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : null);
+
+  return {
+    annotations,
+    whiteAccuracy: avg(whiteAccs),
+    blackAccuracy: avg(blackAccs),
+  };
+};
+
+// Grafico SVG interattivo dell'andamento della valutazione
+function EvalGraph({ snapshots, currentStep, onSelectStep }) {
+  const width = 300;
+  const height = 64;
+  const midY = height / 2;
+
+  const points = snapshots.map((snap, idx) => {
+    const x = snapshots.length <= 1 ? 0 : (idx / (snapshots.length - 1)) * width;
+    let clampedEval = snap.evalWhite || 0;
+    if (snap.mateIn !== null && snap.mateIn !== undefined && snap.mateIn !== 0) {
+      clampedEval = snap.mateIn > 0 ? 6 : -6;
+    } else {
+      clampedEval = Math.max(-6, Math.min(6, clampedEval));
+    }
+    const y = midY - (clampedEval / 6) * (midY - 6);
+    return { x, y };
+  });
+
+  const polylinePoints = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const lastX = points[points.length - 1]?.x.toFixed(1) || 0;
+  const areaPoints = `0,${midY} ${polylinePoints} ${lastX},${midY}`;
+  const activePoint = points[currentStep] || { x: 0, y: midY };
+
+  const handleSvgClick = (e) => {
+    if (snapshots.length <= 1) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, clickX / rect.width));
+    const targetStep = Math.round(ratio * (snapshots.length - 1));
+    onSelectStep(targetStep);
+  };
+
+  return (
+    <div className="eval-graph-container" title="Clicca sul grafico per saltare a una mossa">
+      <svg viewBox={`0 0 ${width} ${height}`} className="eval-graph-svg" onClick={handleSvgClick}>
+        <line x1="0" y1={midY} x2={width} y2={midY} className="eval-zero-line" />
+        <polygon points={areaPoints} className="eval-area-fill" />
+        <polyline fill="none" points={polylinePoints} className="eval-line-stroke" />
+        <line x1={activePoint.x} y1="0" x2={activePoint.x} y2={height} className="eval-cursor-line" />
+        <circle cx={activePoint.x} cy={activePoint.y} r="3.5" className="eval-cursor-dot" />
+      </svg>
+    </div>
+  );
+}
+
 const findCheckedKingSquare = (chessInstance) => {
   const inCheck = typeof chessInstance.inCheck === 'function'
     ? chessInstance.inCheck()
@@ -165,10 +264,19 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAIArrows, setShowAIArrows] = useState(false);
 
+  // Stati Blocco 1: Import FEN & Modalità Scontro tra Leggende (IA vs IA)
+  const [fenInput, setFenInput] = useState('');
+  const [fenError, setFenError] = useState('');
+  const [isSpectatorMode, setIsSpectatorMode] = useState(false);
+  const [whiteLegend, setWhiteLegend] = useState('kasparov');
+  const [blackLegend, setBlackLegend] = useState('tal');
+
   const activeLegendObj = useMemo(
     () => LEGENDS.find((l) => l.id === selectedLegend) || LEGENDS[0],
     [selectedLegend]
   );
+
+  const reviewData = useMemo(() => analyzeMoveHistory(snapshots), [snapshots]);
 
   useEffect(() => {
     Object.entries(SOUND_URLS).forEach(([key, url]) => {
@@ -218,9 +326,9 @@ export default function App() {
   }, [snapshots, resignedWinner, activeLegendObj.name]);
 
   const legalMovesForSelected = useMemo(() => {
-    if (!moveFrom || isViewingHistory || gameOverStatus) return [];
+    if (!moveFrom || isViewingHistory || gameOverStatus || isSpectatorMode) return [];
     return viewedGame.moves({ square: moveFrom, verbose: true });
-  }, [viewedGame, moveFrom, isViewingHistory, gameOverStatus]);
+  }, [viewedGame, moveFrom, isViewingHistory, gameOverStatus, isSpectatorMode]);
 
   useEffect(() => {
     if (moveListRef.current && viewIndex === snapshots.length - 1) {
@@ -230,8 +338,10 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
+        setIsSpectatorMode(false);
         setViewIndex((prev) => Math.max(0, prev - 1));
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
@@ -244,6 +354,7 @@ export default function App() {
         });
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
+        setIsSpectatorMode(false);
         setViewIndex(0);
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -289,9 +400,14 @@ export default function App() {
         if (moveObj) {
           const newFen = masterGameRef.current.fen();
           const isCheckmateNow = masterGameRef.current.isCheckmate?.() ?? masterGameRef.current.in_checkmate?.();
+          const isOverNow = masterGameRef.current.isGameOver?.() ?? masterGameRef.current.game_over?.();
           const computedMate = isCheckmateNow
             ? (masterGameRef.current.turn() === 'w' ? -1 : 1)
             : (data.mate_in ?? null);
+
+          if (isOverNow) {
+            setIsSpectatorMode(false);
+          }
 
           playMoveSound(moveObj, masterGameRef.current);
 
@@ -314,7 +430,7 @@ export default function App() {
 
           setTelemetry({
             confidence: data.confidence ?? null,
-            topMoves: data.top_moves ?? [{ san: data.best_move_san, uci: data.best_move_uci, prob: data.confidence ?? 100 }],
+            topMoves: data.top_moves ?? [{ san: data.best_move_san, uci: data.best_move_uci, pv_san: data.best_move_san, prob: data.confidence ?? 100 }],
             isBook: Boolean(data.is_book_move)
           });
         }
@@ -323,6 +439,7 @@ export default function App() {
       if (error.name !== 'AbortError') {
         console.error('Errore API:', error);
         setApiError('Connessione al motore backend non riuscita (verifica server.py sulla porta 8000).');
+        setIsSpectatorMode(false);
       }
     } finally {
       if (!controller.signal.aborted) {
@@ -330,6 +447,26 @@ export default function App() {
       }
     }
   }, [selectedLegend, playMoveSound]);
+
+  // Modalità Scontro tra Leggende (Auto-Play IA vs IA)
+  useEffect(() => {
+    if (!isSpectatorMode || kasparovThinking || gameOverStatus) return;
+    if (viewIndex !== snapshots.length - 1) return;
+
+    const latestFen = snapshots[snapshots.length - 1].fen;
+    const liveBoard = new Chess(latestFen);
+    const isOver = liveBoard.isGameOver?.() ?? liveBoard.game_over?.();
+    if (isOver) return;
+
+    const activeTurnLegend = liveBoard.turn() === 'w' ? whiteLegend : blackLegend;
+    const historyFens = snapshots.slice(-16).map((s) => s.fen);
+
+    const timer = setTimeout(() => {
+      makeAIMove(latestFen, activeTurnLegend, historyFens);
+    }, 320);
+
+    return () => clearTimeout(timer);
+  }, [isSpectatorMode, kasparovThinking, gameOverStatus, viewIndex, snapshots, whiteLegend, blackLegend, makeAIMove]);
 
   const commitUserMove = useCallback((from, to, promotionPiece = 'q') => {
     try {
@@ -414,7 +551,7 @@ export default function App() {
   };
 
   function onPieceDragBegin(piece, sourceSquare) {
-    if (kasparovThinking || isViewingHistory || gameOverStatus) return;
+    if (kasparovThinking || isViewingHistory || gameOverStatus || isSpectatorMode) return;
     if (piece.charAt(0) === playerColor && masterGameRef.current.turn() === playerColor) {
       setMoveFrom(sourceSquare);
     }
@@ -422,7 +559,7 @@ export default function App() {
   }
 
   function onDrop(sourceSquare, targetSquare) {
-    if (kasparovThinking || isViewingHistory || gameOverStatus) return false;
+    if (kasparovThinking || isViewingHistory || gameOverStatus || isSpectatorMode) return false;
     if (masterGameRef.current.turn() !== playerColor) return false;
 
     if (isPromotionMove(sourceSquare, targetSquare)) {
@@ -436,7 +573,7 @@ export default function App() {
   }
 
   function onSquareClick(square) {
-    if (kasparovThinking || isViewingHistory || gameOverStatus) return;
+    if (kasparovThinking || isViewingHistory || gameOverStatus || isSpectatorMode) return;
     if (masterGameRef.current.turn() !== playerColor) return;
 
     setRightClickedSquares({});
@@ -483,6 +620,7 @@ export default function App() {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
+    setIsSpectatorMode(false);
     masterGameRef.current = new Chess();
     setSnapshots([{ fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null }]);
     setViewIndex(0);
@@ -500,6 +638,59 @@ export default function App() {
     }
   };
 
+  const handleLoadCustomFen = async (e) => {
+    e.preventDefault();
+    const cleanFen = fenInput.trim();
+    if (!cleanFen) return;
+
+    try {
+      const testBoard = new Chess(cleanFen);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      setIsSpectatorMode(false);
+      setKasparovThinking(false);
+      setFenError('');
+      setFenInput('');
+      setMoveFrom(null);
+      setPendingPromotion(null);
+      setRightClickedSquares({});
+      setResignedWinner(null);
+
+      const validFen = testBoard.fen();
+      masterGameRef.current = new Chess(validFen);
+
+      const initialSnap = {
+        fen: validFen,
+        san: null,
+        from: null,
+        to: null,
+        evalWhite: 0.0,
+        mateIn: null,
+      };
+      setSnapshots([initialSnap]);
+      setViewIndex(0);
+      setTelemetry({ confidence: null, topMoves: [], isBook: false });
+
+      const res = await fetch(`${API_BASE}/api/eval_only`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fen: validFen, legend: selectedLegend }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSnapshots([{
+          ...initialSnap,
+          evalWhite: data.eval_white ?? 0.0,
+          mateIn: data.mate_in ?? null,
+        }]);
+      }
+    } catch {
+      setFenError('FEN non valido');
+      setTimeout(() => setFenError(''), 3000);
+    }
+  };
+
   const handleFlipColor = () => {
     const nextColor = playerColor === 'w' ? 'b' : 'w';
     startNewGame(nextColor, selectedLegend);
@@ -508,6 +699,7 @@ export default function App() {
   const handleResign = () => {
     if (gameOverStatus) return;
     if (abortControllerRef.current) abortControllerRef.current.abort();
+    setIsSpectatorMode(false);
     setKasparovThinking(false);
     setResignedWinner(activeLegendObj.name);
     if (soundEnabled && audioCacheRef.current.gameEnd) {
@@ -595,6 +787,19 @@ export default function App() {
   const evalLabel = formatEvalLabel(currentSnapshot.evalWhite, currentSnapshot.mateIn);
   const whiteIsWinning = (currentSnapshot.mateIn ?? currentSnapshot.evalWhite ?? 0) >= 0;
 
+  // Etichetta per il giocatore in basso (Tu oppure la Leggenda in modalità Spettatore)
+  const bottomSpectatorLegend = useMemo(() => {
+    const legId = playerColor === 'w' ? whiteLegend : blackLegend;
+    return LEGENDS.find((l) => l.id === legId) || LEGENDS[0];
+  }, [playerColor, whiteLegend, blackLegend]);
+
+  const topSpectatorLegend = useMemo(() => {
+    const legId = playerColor === 'w' ? blackLegend : whiteLegend;
+    return LEGENDS.find((l) => l.id === legId) || LEGENDS[0];
+  }, [playerColor, whiteLegend, blackLegend]);
+
+  const displayedTopLegend = isSpectatorMode ? topSpectatorLegend : activeLegendObj;
+
   return (
     <div className="lichess-container">
       {/* COLONNA SCACCHIERA + BARRA VALUTAZIONE */}
@@ -604,8 +809,8 @@ export default function App() {
             <span className="status-dot" data-thinking={kasparovThinking} />
             <span>
               {kasparovThinking
-                ? `🧠 ${activeLegendObj.name} sta calcolando (Alpha-Beta)...`
-                : `${activeLegendObj.badge} ${activeLegendObj.name} (${activeLegendObj.title})`}
+                ? `🧠 ${isSpectatorMode ? (viewedGame.turn() === 'w' ? LEGENDS.find((l) => l.id === whiteLegend)?.name : LEGENDS.find((l) => l.id === blackLegend)?.name) : displayedTopLegend.name} sta calcolando (Alpha-Beta)...`
+                : `${displayedTopLegend.badge} ${displayedTopLegend.name} (${displayedTopLegend.title})`}
             </span>
             {telemetry.isBook && !kasparovThinking && (
               <span className="book-badge" title="Mossa storica giocata realmente dal Grande Maestro">
@@ -618,7 +823,7 @@ export default function App() {
             {aiAdvantage > 0 && <span className="advantage">+{aiAdvantage}</span>}
           </div>
         </div>
-        
+
         {apiError && (
           <div className="api-error-banner" role="alert">{apiError}</div>
         )}
@@ -648,7 +853,7 @@ export default function App() {
               boardOrientation={playerColor === 'w' ? 'white' : 'black'}
               customSquareStyles={customSquareStyles}
               showBoardNotation={true}
-              arePiecesDraggable={!kasparovThinking && !isViewingHistory && !gameOverStatus}
+              arePiecesDraggable={!kasparovThinking && !isViewingHistory && !gameOverStatus && !isSpectatorMode}
               areArrowsAllowed={true}
               customArrowColor="rgba(255, 170, 0, 0.85)"
               {...(aiCandidateArrows ? { customArrows: aiCandidateArrows } : {})}
@@ -687,7 +892,11 @@ export default function App() {
 
         <div className="player-info">
           <div className="player-title">
-            <span>👤 Tu ({playerColor === 'w' ? 'Bianco' : 'Nero'})</span>
+            <span>
+              {isSpectatorMode
+                ? `${bottomSpectatorLegend.badge} ${bottomSpectatorLegend.name} (${playerColor === 'w' ? 'Bianco' : 'Nero'})`
+                : `👤 Tu (${playerColor === 'w' ? 'Bianco' : 'Nero'})`}
+            </span>
             {isViewingHistory && (
               <span className="history-badge" onClick={() => setViewIndex(snapshots.length - 1)}>
                 ⏪ Storico (Torna live)
@@ -701,7 +910,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* COLONNA LATERALE: SELETTORE LEGGENDE, TELEMETRIA, STORICO E CONTROLLI */}
+      {/* COLONNA LATERALE: SELETTORE LEGGENDE, TELEMETRIA, GRAFICO, STORICO E CONTROLLI */}
       <div className="sidebar-column">
         {/* SELETTORE DI LEGGENDE (PUNTO C) */}
         <div className="legend-selector-panel">
@@ -725,7 +934,7 @@ export default function App() {
           <div className="legend-active-desc">{activeLegendObj.desc}</div>
         </div>
 
-        {/* TELEMETRIA ALPHA-BETA + POLICY NET */}
+        {/* TELEMETRIA ALPHA-BETA + POLICY NET CON PRINCIPAL VARIATION */}
         <div className="telemetry-panel">
           <div className="telemetry-header">
             <span>⚡ Alpha-Beta + Policy</span>
@@ -752,15 +961,22 @@ export default function App() {
           {telemetry.topMoves.length > 0 ? (
             <div className="candidate-list">
               {telemetry.topMoves.map((cand, idx) => (
-                <div key={cand.uci || idx} className="candidate-row">
-                  <span className="candidate-san">{formatMoveToFigurine(cand.san)}</span>
-                  <div className="candidate-bar-track">
-                    <div
-                      className="candidate-bar-fill"
-                      style={{ width: `${Math.min(100, cand.prob)}%` }}
-                    />
+                <div key={cand.uci || idx} className="candidate-item">
+                  <div className="candidate-row">
+                    <span className="candidate-san">{formatMoveToFigurine(cand.san)}</span>
+                    <div className="candidate-bar-track">
+                      <div
+                        className="candidate-bar-fill"
+                        style={{ width: `${Math.min(100, cand.prob)}%` }}
+                      />
+                    </div>
+                    <span className="candidate-prob">{cand.prob}%</span>
                   </div>
-                  <span className="candidate-prob">{cand.prob}%</span>
+                  {cand.pv_san && (
+                    <span className="telemetry-pv" title={`Variante principale: ${cand.pv_san}`}>
+                      PV: {formatMoveToFigurine(cand.pv_san)}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -771,12 +987,39 @@ export default function App() {
           )}
         </div>
 
+        {/* GRAFICO DI VALUTAZIONE E PRECISIONE GAME REVIEW */}
+        <div className="review-panel">
+          <EvalGraph
+            snapshots={snapshots}
+            currentStep={viewIndex}
+            onSelectStep={(step) => {
+              setIsSpectatorMode(false);
+              setViewIndex(step);
+            }}
+          />
+          {reviewData.whiteAccuracy !== null && (
+            <div className="accuracy-summary">
+              <div className="acc-box white">
+                <span>Precisione ♔</span>
+                <strong>{reviewData.whiteAccuracy}%</strong>
+              </div>
+              <div className="acc-box black">
+                <span>Precisione ♚</span>
+                <strong>{reviewData.blackAccuracy ?? '—'}{reviewData.blackAccuracy ? '%' : ''}</strong>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* NAVIGAZIONE STORICO */}
         <div className="nav-Controls">
           <button
             className="nav-btn"
             disabled={viewIndex === 0}
-            onClick={() => setViewIndex(0)}
+            onClick={() => {
+              setIsSpectatorMode(false);
+              setViewIndex(0);
+            }}
             title="Inizio partita (Freccia Su)"
           >
             |&lt;
@@ -784,7 +1027,10 @@ export default function App() {
           <button
             className="nav-btn"
             disabled={viewIndex === 0}
-            onClick={() => setViewIndex((i) => Math.max(0, i - 1))}
+            onClick={() => {
+              setIsSpectatorMode(false);
+              setViewIndex((i) => Math.max(0, i - 1));
+            }}
             title="Mossa precedente (Freccia Sinistra)"
           >
             &lt;
@@ -813,37 +1059,100 @@ export default function App() {
           </button>
         </div>
 
-        {/* CRONOLOGIA MOSSE */}
+        {/* CRONOLOGIA MOSSE CON BADGE GAME REVIEW */}
         <div className="move-list" ref={moveListRef}>
-          {movePairs.map((pair) => (
-            <div key={pair.moveNumber} className="move-row">
-              <span className="move-number">{pair.moveNumber}</span>
-              <span
-                className={`move-cell ${viewIndex === pair.white.index ? 'active-move' : ''}`}
-                onClick={() => setViewIndex(pair.white.index)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.white.index)}
-              >
-                {formatMoveToFigurine(pair.white.san)}
-              </span>
-              <span
-                className={`move-cell ${pair.black && viewIndex === pair.black.index ? 'active-move' : ''}`}
-                onClick={() => pair.black && setViewIndex(pair.black.index)}
-                role={pair.black ? 'button' : undefined}
-                tabIndex={pair.black ? 0 : undefined}
-                onKeyDown={(e) =>
-                  pair.black && (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.black.index)
-                }
-              >
-                {pair.black ? formatMoveToFigurine(pair.black.san) : ''}
-              </span>
-            </div>
-          ))}
+          {movePairs.map((pair) => {
+            const wBadge = reviewData.annotations[pair.white.index];
+            const bBadge = pair.black ? reviewData.annotations[pair.black.index] : null;
+            return (
+              <div key={pair.moveNumber} className="move-row">
+                <span className="move-number">{pair.moveNumber}</span>
+                <span
+                  className={`move-cell ${viewIndex === pair.white.index ? 'active-move' : ''}`}
+                  onClick={() => {
+                    setIsSpectatorMode(false);
+                    setViewIndex(pair.white.index);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.white.index)}
+                >
+                  <span>{formatMoveToFigurine(pair.white.san)}</span>
+                  {wBadge && (
+                    <span className={`move-badge ${wBadge.className}`} title={wBadge.label}>
+                      {wBadge.symbol}
+                    </span>
+                  )}
+                </span>
+                <span
+                  className={`move-cell ${pair.black && viewIndex === pair.black.index ? 'active-move' : ''}`}
+                  onClick={() => {
+                    if (pair.black) {
+                      setIsSpectatorMode(false);
+                      setViewIndex(pair.black.index);
+                    }
+                  }}
+                  role={pair.black ? 'button' : undefined}
+                  tabIndex={pair.black ? 0 : undefined}
+                  onKeyDown={(e) =>
+                    pair.black && (e.key === 'Enter' || e.key === ' ') && setViewIndex(pair.black.index)
+                  }
+                >
+                  <span>{pair.black ? formatMoveToFigurine(pair.black.san) : ''}</span>
+                  {bBadge && (
+                    <span className={`move-badge ${bBadge.className}`} title={bBadge.label}>
+                      {bBadge.symbol}
+                    </span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
 
-        {/* BARRA CONTROLLI PARTITA */}
+        {/* BARRA CONTROLLI PARTITA + SCONTRO LEGGENDE + IMPORT FEN */}
         <div className="action-bar">
+          <div className="spectator-controls">
+            <div className="spectator-header">
+              <span>⚔️ Scontro tra Leggende</span>
+              <button
+                type="button"
+                className={`btn-spectator ${isSpectatorMode ? 'active' : ''}`}
+                onClick={() => {
+                  setViewIndex(snapshots.length - 1);
+                  setIsSpectatorMode((prev) => !prev);
+                }}
+                disabled={Boolean(gameOverStatus)}
+              >
+                {isSpectatorMode ? '⏸ Pausa IA vs IA' : '▶ Avvia IA vs IA'}
+              </button>
+            </div>
+            <div className="spectator-selectors">
+              <select value={whiteLegend} onChange={(e) => setWhiteLegend(e.target.value)}>
+                {LEGENDS.map((l) => (
+                  <option key={`w-${l.id}`} value={l.id}>♔ {l.name.split(' ')[1]}</option>
+                ))}
+              </select>
+              <span className="vs-label">vs</span>
+              <select value={blackLegend} onChange={(e) => setBlackLegend(e.target.value)}>
+                {LEGENDS.map((l) => (
+                  <option key={`b-${l.id}`} value={l.id}>♚ {l.name.split(' ')[1]}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <form className="fen-import-bar" onSubmit={handleLoadCustomFen}>
+            <input
+              type="text"
+              placeholder="Incolla posizione FEN..."
+              value={fenInput}
+              onChange={(e) => setFenInput(e.target.value)}
+            />
+            <button type="submit">Carica</button>
+            {fenError && <span className="fen-error">{fenError}</span>}
+          </form>
+
           <div className="action-row">
             <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor, selectedLegend)}>
               Nuova Partita
