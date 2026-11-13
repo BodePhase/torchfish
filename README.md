@@ -28,12 +28,21 @@
    pip install -r requirements.txt
    ```
 
-3. **Eseguire i test di integrità del motore (Opzionale ma consigliato):**
+3. **(Opzionale) Generare Opening Book e Pesi Neurali da file PGN storici:**
+   Inserire i file `.pgn` nelle rispettive cartelle (`data/gm_kasparov/Kasparov.pgn`, `data/gm_tal/Tal.pgn`, `data/gm_karpov/Karpov.pgn`, `data/gm_carlsen/Carlsen.pgn`) ed eseguire la pipeline unificata:
+   ```bash
+   python build_legend.py --legend kasparov
+   python build_legend.py --legend tal
+   python build_legend.py --legend karpov
+   python build_legend.py --legend carlsen
+   ```
+
+4. **Eseguire i test di integrità del motore (Opzionale ma consigliato):**
    ```bash
    pytest -v tests/test_engine.py
    ```
 
-4. **Avviare in parallelo il server backend e l'interfaccia web React:**
+5. **Avviare in parallelo il server backend e l'interfaccia web React:**
    È possibile avviare tutto con lo script bash dedicato:
    ```bash
    ./start.sh
@@ -49,13 +58,13 @@ Una volta avviati entrambi i servizi, aprire il browser all'URL mostrato da Vite
 
 ## 3. Caratteristiche tecniche
 
-### Architettura Ibrida: Policy Network e Ricerca Tattica
-Una Policy Network pura addestrata per Behavioral Cloning predice le mosse sulla base di pattern geometrici, ma risulta vulnerabile a sviste tattiche in posizioni fuori distribuzione. TorchFish risolve questo limite integrando due livelli:
-* **`KasparovPolicyNet` (PyTorch):** Rete neurale convoluzionale (Tensore di input 14x8x8) che mappa lo stato della scacchiera in una distribuzione di probabilità Softmax su un dizionario di 4544 mosse UCI (models/uci_dictionary.json), fornendo i prior posizionali alla radice.
-* **Synthetic Blunder Injection (`augment_tactics.py`):** Pipeline di data augmentation che arricchisce i dataset storici con posizioni tattiche sintetiche (matti in 1 e catture di pezzi lasciati indifesi), consolidando i riflessi anti-blunder tramite fine-tuning.
-* **Meccanismo *Blunder Lock*:** Alla radice, i bonus stilistici della rete neurale e dell'Opening Book vengono applicati solo alle mosse tatticamente sane; se una mossa perde $\ge 85$ centipawn rispetto alla migliore variante calcolata dal motore Alpha-Beta, i bonus di stile vengono azzerati per impedire la perdita di materiale a fini "stilistici".
+### Architettura Ibrida e Pipeline Multi-Leggenda (`build_legend.py`)
+Una Policy Network pura addestrata per *Behavioral Cloning* predice le mosse sulla base di pattern geometrici ma è priva di calcolo concreto (*0-ply lookahead*), risultando vulnerabile a sviste tattiche in posizioni fuori distribuzione. TorchFish risolve questo limite integrando tre componenti:
+* **`KasparovPolicyNet` (PyTorch):** Rete neurale convoluzionale (tensore di input `14x8x8`) che mappa lo stato della scacchiera in una distribuzione di probabilità Softmax su un dizionario di **4544 mosse UCI** (`models/uci_dictionary.json`), fornendo i *prior* posizionali alla radice per ciascuna Leggenda (`weights/{legend}_policy.pth`).
+* **Pipeline Automatizzata (`build_legend.py`):** Script end-to-end che estrae le mosse storiche dal file `.pgn` del Grande Maestro per popolare l'Opening Book (`data/gm_{legend}/{legend}_moves.csv`), inietta automaticamente un `+20%` di posizioni tattiche sintetiche (matti in 1 e catture di pezzi indifesi) e addestra da zero la rete neurale con ottimizzatore `AdamW` e scheduler `CosineAnnealingLR`.
+* **Meccanismo *Blunder Lock*:** Alla radice, i bonus stilistici della rete neurale e dell'Opening Book vengono applicati solo alle mosse tatticamente sane; se una mossa perde $\ge 85$ centipawn rispetto alla migliore variante calcolata dal motore Alpha-Beta, i bonus di stile vengono azzerati per impedire errori materiali.
 
-### Algoritmo di ricerca
+### Algoritmo di Ricerca Tattica
 Il motore tattico (`inference.py`) implementa un albero di ricerca **Iterative Deepening Negamax** con le seguenti tecniche di potatura ed estensione:
 * **Principal Variation Search (PVS) & Alpha-Beta Pruning:** Esplora la variante principale a finestra piena e utilizza finestre ridotte (*Null Window*) per confutare rapidamente le alternative sub-ottimali.
 * **Quiescence Search con Delta Pruning:** Estende la ricerca oltre le foglie dell'albero principale valutando tutte le sequenze di catture, promozioni ed evasioni dallo scacco (fino a 6-7 ply aggiuntivi) per eliminare l'effetto orizzonte.
@@ -63,7 +72,7 @@ Il motore tattico (`inference.py`) implementa un albero di ricerca **Iterative D
 * **Late Move Reductions (LMR):** Riduce di 1 o 2 ply la profondità di analisi per le mosse silenziose ordinate in fondo alla lista, ricalcolandole a profondità piena solo se superano `alpha`.
 * **Check Extensions:** Estende automaticamente di 1 ply la profondità quando il giocatore di turno si trova sotto scacco, evitando che scacchi di distrazione nascondano perdite materiali oltre l'orizzonte di ricerca.
 
-### Sistema di valutazione (PeSTO Tapered Evaluation)
+### Sistema di Valutazione (PeSTO Tapered Evaluation)
 La funzione di valutazione statica (`_static_eval_cp`) opera in centesimi di pedone (*centipawns*) sfruttando i bitboard nativi di `python-chess`:
 
 | Componente | Descrizione tecnica | Scopo scacchistico |
@@ -71,15 +80,15 @@ La funzione di valutazione statica (`_static_eval_cp`) opera in centesimi di ped
 | **Tapered Eval (PeSTO)** | Interpolazione lineare tra punteggio di Mediogioco (`MG`) e Finale (`EG`) basata su `game_phase` (da `24` a `0`). | Consente al Re di restare protetto nell'arrocco durante il mediogioco e di centralizzarsi attivamente nei finali. |
 | **Tabelle PST Pre-fuse** | Matrici `MG_WHITE/BLACK` ed `EG_WHITE/BLACK` con valori materiali e posizionali pre-sommati per tutte le 64 case. | Esegue la valutazione materiale e posizionale in $O(1)$ per pezzo senza moltiplicazioni a runtime. |
 | **Bitboard Passed Pawns** | Maschere binarie a 64 bit pre-calcolate (`PASSED_MASK_WHITE/BLACK`) confrontate tramite `AND` bit-a-bit. | Riconosce istantaneamente i pedoni passati assegnando bonus crescenti fino a `+215 cp` in settima traversa. |
-| ** Struttura e Pezzi** | Bonus per la coppia degli Alfieri (`+30 MG / +45 EG`) e per le Torri su colonne aperte (`+22 cp`) o semi-aperte (`+10 cp`). | Premia il controllo delle linee aperte e il coordinamento dei pezzi a lungo raggio. |
+| **Struttura e Pezzi** | Bonus per la coppia degli Alfieri (`+30 MG / +45 EG`) e per le Torri su colonne aperte (`+22 cp`) o semi-aperte (`+10 cp`). | Premia il controllo delle linee aperte e il coordinamento dei pezzi a lungo raggio. |
 | **Sicurezza Arrocco** | Penalità nel mediogioco (`-70 cp` nella statica, `-140 cp` alla radice) per la perdita artificiale dei diritti d'arrocco. | Impedisce mosse premature di Re o Torre prima dello sviluppo completo. |
 | **Mop-Up Evaluation** | Attiva per `game_phase <= 6` e vantaggio $> 300$ cp tramite distanza dal centro (`CENTER_DIST`) e distanza tra i Re. | Spinge il Re avversario verso il bordo e avvicina il Re vincente per forzare lo scacco matto nei finali. |
 
 ### Ottimizzazioni, Ordinamento Mosse e Gestione del Tempo
-* **Ordinamento Mosse (`_order_moves`):** Ordina i nodi dando priorità a: 1) Mossa della Transposition Table (`100.000`), 2) Catture ordinate per *MVV-LVA* (*Most Valuable Victim - Least Valuable Attacker*), 3) Promozioni, 4) *Killer Moves* (2 mosse silenziose per ply che hanno causato un beta-cutoff), 5) Disimpegno di pezzi attaccati.
-* **Transposition Table (`self.tt`):** Tabella hash fino a 200.000 posizioni con flag `TT_EXACT`, `TT_LOWER` e `TT_UPPER` per riutilizzare i sotto-alberi già valutati tra le iterazioni dell'Iterative Deepening.
-* **Controllo del Tempo (*Hard-Stop*):** Budget predefinito di `600 ms` per mossa, monitorato ogni 1024 nodi tramite eccezione dedicata `SearchTimeout`, garantendo il completamento minimo del 2° ply e la restituzione immediata della miglior mossa trovata all'iterazione completa più profonda.
-* **Memoria Anti-Ripetizione e Opening Book:** Coda circolare (`deque`) delle ultime 16 posizioni per penalizzare il pendolarismo sterile e dizionario delle aperture estratto dai file CSV delle partite storiche.
+* **Ordinamento Mosse (`_order_moves`):** Ordina i nodi pre-calcolando la bitboard delle case attaccate dall'avversario (`enemy_attacks_mask`) e dando priorità a: 1) Mossa della Transposition Table (`100.000`), 2) Catture ordinate per *MVV-LVA*, 3) Promozioni, 4) *Killer Moves*, 5) Disimpegno di pezzi attaccati.
+* **Transposition Table (`self.tt`):** Tabella hash fino a 200.000 posizioni con normalizzazione dei punteggi di matto rispetto al `ply` (`_score_to_tt` / `_score_from_tt`) e flag `TT_EXACT`, `TT_LOWER` e `TT_UPPER`.
+* **Controllo del Tempo (*Hard-Stop*):** Budget predefinito di `600 ms` per mossa, monitorato ogni 1024 nodi tramite eccezione `SearchTimeout`, con ripristino garantito dello stato della scacchiera e utilizzo dell'ultima iterazione completa.
+* **Memoria Anti-Ripetizione Stateless:** La cronologia delle posizioni della partita (`history_fens`) viene inviata dal client React ad ogni richiesta, permettendo il *time-travel* nello storico mosse senza inquinare lo stato del server.
 
 ### Protocollo API e Interfaccia Web (`torchfish-ui`)
 Il motore non utilizza il protocollo testuale UCI su standard input/output, ma espone una **REST API JSON** tramite **FastAPI** (`server.py`):
