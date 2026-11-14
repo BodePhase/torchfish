@@ -7,6 +7,7 @@ from collections import deque
 import torch
 import torch.nn.functional as F
 import chess
+import chess.polyglot
 from dataset_policy import board_to_tensor as encode_board_tensor
 from models.policy_net import KasparovPolicyNet
 
@@ -46,6 +47,14 @@ PHASE_WEIGHT = {
     chess.BISHOP: 1,
     chess.ROOK: 2,
     chess.QUEEN: 4,
+}
+
+# Pesi di attacco per la King Safety nella zona del Re avversario
+KING_ATTACK_WEIGHT = {
+    chess.KNIGHT: 18,
+    chess.BISHOP: 18,
+    chess.ROOK: 28,
+    chess.QUEEN: 52,
 }
 
 NON_KING_PIECES = (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
@@ -110,7 +119,7 @@ _RAW_MG_PST = {
          -47,  60,  37,  65,  84, 129,  73,   44,
           -9,  17,  19,  53,  37,  69,  18,   22,
          -13,   4,  16,  13,  28,  19,  21,   -8,
-         -23, -9,  12,  10,  19,  17,  25,  -16,
+         -23,  -9,  12,  10,  19,  17,  25,  -16,
          -29, -53, -12,  -3,  -1,  18, -14,  -19,
         -105, -21, -58, -33, -17, -28, -19,  -23,
     ],
@@ -213,7 +222,7 @@ _RAW_EG_PST = {
          10,  17,  23,  15,  20,  45,  44,  13,
          -8,  22,  24,  27,  26,  33,  26,   3,
         -18,  -4,  21,  24,  27,  23,   9, -11,
-        -19,  -3,  11,  21,  23,  16,   7, -9,
+        -19,  -3,  11,  21,  23,  16,   7,  -9,
         -27, -11,   4,  13,  14,   4,  -5, -17,
         -53, -34, -21, -11, -28, -14, -24, -43,
     ],
@@ -234,7 +243,7 @@ for _pt in _RAW_MG_PST:
         EG_WHITE[_pt][_sq] = _eg_v + _RAW_EG_PST[_pt][_sq ^ 56]
         EG_BLACK[_pt][_sq] = _eg_v + _RAW_EG_PST[_pt][_sq]
 
-# Pre-compilazione Maschere Bitboard per Pedoni Passati, Colonne e Mop-Up
+# Pre-compilazione Maschere Bitboard per Colonne, Colonne Adiacenti, Pedoni Passati e King Zone
 FILE_MASKS = [0] * 8
 for _f in range(8):
     mask = 0
@@ -242,16 +251,23 @@ for _f in range(8):
         mask |= 1 << (_r * 8 + _f)
     FILE_MASKS[_f] = mask
 
+ADJACENT_FILES_MASKS = [0] * 8
+for _f in range(8):
+    adj = 0
+    if _f > 0:
+        adj |= FILE_MASKS[_f - 1]
+    if _f < 7:
+        adj |= FILE_MASKS[_f + 1]
+    ADJACENT_FILES_MASKS[_f] = adj
+
 PASSED_MASK_WHITE = [0] * 64
 PASSED_MASK_BLACK = [0] * 64
+KING_ZONE_MASKS = [0] * 64
+
 for _sq in range(64):
     _f = _sq & 7
     _r = _sq >> 3
-    _adj_files = FILE_MASKS[_f]
-    if _f > 0:
-        _adj_files |= FILE_MASKS[_f - 1]
-    if _f < 7:
-        _adj_files |= FILE_MASKS[_f + 1]
+    _adj_files = FILE_MASKS[_f] | ADJACENT_FILES_MASKS[_f]
 
     _w_front = 0
     for _nr in range(_r + 1, 8):
@@ -262,6 +278,12 @@ for _sq in range(64):
     for _nr in range(0, _r):
         _b_front |= 0xFF << (_nr * 8)
     PASSED_MASK_BLACK[_sq] = _adj_files & _b_front
+
+    _kz = 0
+    for _target_sq in range(64):
+        if chess.square_distance(_sq, _target_sq) <= 1:
+            _kz |= 1 << _target_sq
+    KING_ZONE_MASKS[_sq] = _kz
 
 PASSED_BONUS_MG = [0, 5, 10, 20, 35, 65, 110, 0]
 PASSED_BONUS_EG = [0, 10, 22, 45, 80, 140, 215, 0]
@@ -278,6 +300,7 @@ for _sq in range(64):
 TT_EXACT = 0
 TT_LOWER = 1
 TT_UPPER = 2
+MAX_TT_SIZE = 250000
 
 
 class SearchTimeout(Exception):
@@ -310,9 +333,15 @@ class KasparovEngine:
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.default_model_path = model_path
+        self.default_book_path = book_csv_path
         self.recent_positions = deque(maxlen=16)
         self.tt = {}
         self.killers = {}
+        self.history = {
+            chess.WHITE: [[0] * 64 for _ in range(64)],
+            chess.BLACK: [[0] * 64 for _ in range(64)],
+        }
+        self.current_aggression = 1.0
         self.nodes_searched = 0
         self.abort_time = 0.0
 
@@ -339,28 +368,16 @@ class KasparovEngine:
 
         self.num_classes = len(self.move_to_idx)
 
-        # 2. Carica i modelli Policy per le Leggende
+        # 2. Lazy Loading: pre-carica solo il modello di default (Kasparov)
+        #    Le altre Leggende e gli Opening Book vengono caricati on-demand al primo utilizzo
         self.policy_models = {}
         self.opening_books = {}
         self.policy_channels = 14
 
-        base_net = self._load_policy_model(model_path)
-        self.policy_models["kasparov"] = base_net
+        if os.path.exists(model_path):
+            self.policy_models["kasparov"] = self._load_policy_model(model_path)
 
-        for legend_id, cfg in LEGENDS_PROFILES.items():
-            w_path = cfg["weights_path"]
-            if legend_id != "kasparov" and os.path.exists(w_path):
-                try:
-                    self.policy_models[legend_id] = self._load_policy_model(w_path)
-                except Exception:
-                    self.policy_models[legend_id] = base_net
-            else:
-                self.policy_models[legend_id] = base_net
-
-            b_path = cfg["book_path"] if os.path.exists(cfg["book_path"]) else book_csv_path
-            self.opening_books[legend_id] = self._load_book(b_path) if os.path.exists(b_path) else {}
-
-        print(f"[TorchFish] Motore PeSTO Tapered + LMR/NMP + KasparovNet attivo su {self.device}.")
+        print(f"[TorchFish] Motore PeSTO Tapered + Zobrist/History + KasparovNet attivo su {self.device}.")
 
     def _load_policy_model(self, path: str):
         try:
@@ -379,6 +396,26 @@ class KasparovEngine:
         self.policy_channels = first_param.shape[1] if first_param.ndim == 4 else 14
         return net
 
+    def _get_policy_model(self, legend_id: str):
+        """Restituisce il modello Policy della Leggenda caricandolo on-demand (Lazy Loading)."""
+        if legend_id in self.policy_models:
+            return self.policy_models[legend_id]
+
+        cfg = LEGENDS_PROFILES.get(legend_id, LEGENDS_PROFILES["kasparov"])
+        w_path = cfg["weights_path"]
+        if os.path.exists(w_path):
+            try:
+                model = self._load_policy_model(w_path)
+                self.policy_models[legend_id] = model
+                return model
+            except Exception as e:
+                print(f"[TorchFish] Errore caricamento pesi {w_path}, fallback a kasparov: {e}")
+
+        if "kasparov" not in self.policy_models:
+            self.policy_models["kasparov"] = self._load_policy_model(self.default_model_path)
+        self.policy_models[legend_id] = self.policy_models["kasparov"]
+        return self.policy_models[legend_id]
+
     def _load_book(self, csv_path: str) -> dict:
         book = {}
         try:
@@ -393,6 +430,33 @@ class KasparovEngine:
         except Exception as e:
             print(f"[TorchFish] Avviso caricamento opening book ({csv_path}): {e}")
         return book
+
+    def _get_opening_book(self, legend_id: str) -> dict:
+        """Restituisce l'Opening Book della Leggenda caricandolo on-demand (Lazy Loading)."""
+        if legend_id in self.opening_books:
+            return self.opening_books[legend_id]
+
+        cfg = LEGENDS_PROFILES.get(legend_id, LEGENDS_PROFILES["kasparov"])
+        b_path = cfg["book_path"] if os.path.exists(cfg["book_path"]) else self.default_book_path
+        self.opening_books[legend_id] = self._load_book(b_path) if os.path.exists(b_path) else {}
+        return self.opening_books[legend_id]
+
+    def _age_history_tables(self):
+        """Dimezza i punteggi della History Heuristic tra una mossa e l'altra per evitare saturazione."""
+        for color in (chess.WHITE, chess.BLACK):
+            table = self.history[color]
+            for from_sq in range(64):
+                row = table[from_sq]
+                for to_sq in range(64):
+                    if row[to_sq]:
+                        row[to_sq] >>= 1
+
+    def _clear_history_tables(self):
+        for color in (chess.WHITE, chess.BLACK):
+            table = self.history[color]
+            for from_sq in range(64):
+                for to_sq in range(64):
+                    table[from_sq][to_sq] = 0
 
     def get_legends_info(self):
         return [
@@ -413,7 +477,7 @@ class KasparovEngine:
         return tensor
 
     # =========================================================================
-    # VALUTAZIONE PeSTO TAPERED + BITBOARD PASSED PAWNS + MOP-UP ENDGAME
+    # VALUTAZIONE PeSTO TAPERED + STRUTTURA PEDONI + KING SAFETY + MOP-UP
     # =========================================================================
     def _static_eval_cp(self, board: chess.Board) -> int:
         if board.is_checkmate():
@@ -427,6 +491,14 @@ class KasparovEngine:
 
         w_pawns_bb = int(board.pieces(chess.PAWN, chess.WHITE))
         b_pawns_bb = int(board.pieces(chess.PAWN, chess.BLACK))
+
+        w_king = board.king(chess.WHITE)
+        b_king = board.king(chess.BLACK)
+        w_king_zone = KING_ZONE_MASKS[w_king] if w_king is not None else 0
+        b_king_zone = KING_ZONE_MASKS[b_king] if b_king is not None else 0
+
+        w_king_attack_score = 0
+        b_king_attack_score = 0
 
         for pt in NON_KING_PIECES:
             w_squares = board.pieces(pt, chess.WHITE)
@@ -457,18 +529,26 @@ class KasparovEngine:
                     mg_score -= 30
                     eg_score -= 45
 
-            # Pedoni Passati (controllo bitboard O(1))
+            # Pedoni Passati e Isolati (controllo bitboard O(1))
             elif pt == chess.PAWN:
                 for sq in w_squares:
+                    f_idx = sq & 7
                     if (b_pawns_bb & PASSED_MASK_WHITE[sq]) == 0:
                         rank = sq >> 3
                         mg_score += PASSED_BONUS_MG[rank]
                         eg_score += PASSED_BONUS_EG[rank]
+                    if (w_pawns_bb & ADJACENT_FILES_MASKS[f_idx]) == 0:
+                        mg_score -= 12
+                        eg_score -= 16
                 for sq in b_squares:
+                    f_idx = sq & 7
                     if (w_pawns_bb & PASSED_MASK_BLACK[sq]) == 0:
                         rank = 7 - (sq >> 3)
                         mg_score -= PASSED_BONUS_MG[rank]
                         eg_score -= PASSED_BONUS_EG[rank]
+                    if (b_pawns_bb & ADJACENT_FILES_MASKS[f_idx]) == 0:
+                        mg_score += 12
+                        eg_score += 16
 
             # Torri su colonne aperte o semi-aperte
             elif pt == chess.ROOK:
@@ -481,9 +561,42 @@ class KasparovEngine:
                     if (b_pawns_bb & f_mask) == 0:
                         mg_score -= 22 if (w_pawns_bb & f_mask) == 0 else 10
 
+            # Pressione offensiva nella zona del Re avversario (King Safety)
+            if pt in KING_ATTACK_WEIGHT:
+                atk_w = KING_ATTACK_WEIGHT[pt]
+                if b_king_zone:
+                    for sq in w_squares:
+                        hits = (int(board.attacks_mask(sq)) & b_king_zone).bit_count()
+                        if hits:
+                            w_king_attack_score += hits * atk_w
+                if w_king_zone:
+                    for sq in b_squares:
+                        hits = (int(board.attacks_mask(sq)) & w_king_zone).bit_count()
+                        if hits:
+                            b_king_attack_score += hits * atk_w
+
+        # Penalità per Pedoni Doppiati per colonna (O(1) con bit_count)
+        for f_mask in FILE_MASKS:
+            w_in_file = (w_pawns_bb & f_mask).bit_count()
+            if w_in_file > 1:
+                extra = w_in_file - 1
+                mg_score -= 11 * extra
+                eg_score -= 17 * extra
+            b_in_file = (b_pawns_bb & f_mask).bit_count()
+            if b_in_file > 1:
+                extra = b_in_file - 1
+                mg_score += 11 * extra
+                eg_score += 17 * extra
+
+        # Applica il bonus di King Safety modulato dall'aggressività della Leggenda
+        if game_phase >= 10:
+            aggr = self.current_aggression
+            if board.turn == chess.WHITE:
+                mg_score += int(w_king_attack_score * aggr) - b_king_attack_score
+            else:
+                mg_score += w_king_attack_score - int(b_king_attack_score * aggr)
+
         # Valutazione Re (MG vs EG)
-        w_king = board.king(chess.WHITE)
-        b_king = board.king(chess.BLACK)
         if w_king is not None:
             mg_score += MG_WHITE[chess.KING][w_king]
             eg_score += EG_WHITE[chess.KING][w_king]
@@ -503,7 +616,7 @@ class KasparovEngine:
         eg_phase = 24 - mg_phase
         score = (mg_score * mg_phase + eg_score * eg_phase) // 24
 
-        # Mop-Up Evaluation nei finali vinti (forza il Re perdente verso il bordo e avvicina il Re vincente)
+        # Mop-Up Evaluation nei finali vinti
         if game_phase <= 6 and w_king is not None and b_king is not None:
             kings_dist = chess.square_distance(w_king, b_king)
             if score > 300:
@@ -571,10 +684,11 @@ class KasparovEngine:
         return alpha
 
     # =========================================================================
-    # NEGAMAX ALPHA-BETA CON NMP, LMR, KILLER MOVES & CHECK EXTENSION
+    # NEGAMAX ALPHA-BETA CON ZOBRIST 64-BIT, HISTORY HEURISTIC, NMP & LMR
     # =========================================================================
     def _order_moves(self, board: chess.Board, moves: list, tt_move: chess.Move, ply: int) -> list:
         killer_pair = self.killers.get(ply, (None, None))
+        hist_table = self.history[board.turn]
         enemy = not board.turn
         enemy_attacks_mask = 0
         for sq in chess.SquareSet(board.occupied_co[enemy]):
@@ -594,7 +708,7 @@ class KasparovEngine:
             if m == killer_pair[1]:
                 return 7500
 
-            s = 0
+            s = min(6000, hist_table[m.from_square][m.to_square])
             moving_pt = board.piece_type_at(m.from_square)
             if moving_pt and moving_pt != chess.KING:
                 if (enemy_attacks_mask >> m.from_square) & 1:
@@ -610,6 +724,25 @@ class KasparovEngine:
             if board.pieces(pt, color):
                 return True
         return False
+
+    def _store_tt(self, pos_key: int, depth: int, tt_flag: int, score: int, best_move: chess.Move):
+        """Salva nella Transposition Table con politica Depth-Preferred."""
+        existing = self.tt.get(pos_key)
+        if existing is not None:
+            old_depth, old_flag, _, _ = existing
+            if depth < old_depth and not (tt_flag == TT_EXACT and old_flag != TT_EXACT):
+                return
+
+        if len(self.tt) >= MAX_TT_SIZE and existing is None:
+            # Rimuove solo i nodi foglia superficiali (depth <= 1) preservando le linee profonde
+            shallow_keys = [k for k, v in self.tt.items() if v[0] <= 1]
+            if shallow_keys:
+                for k in shallow_keys[: len(shallow_keys) // 2 + 1]:
+                    self.tt.pop(k, None)
+            else:
+                self.tt.clear()
+
+        self.tt[pos_key] = (depth, tt_flag, score, best_move)
 
     def _negamax(
         self,
@@ -639,7 +772,7 @@ class KasparovEngine:
             return self._quiescence_cp(board, alpha, beta, 0)
 
         alpha_orig = alpha
-        pos_key = getattr(board, "_transposition_key", board.fen)()
+        pos_key = chess.polyglot.zobrist_hash(board)
         tt_entry = self.tt.get(pos_key)
         tt_move = None
 
@@ -704,12 +837,10 @@ class KasparovEngine:
                 if do_lmr and move_idx >= 8:
                     reduction = 2
 
-                # Ricerca con finestra ridotta (Null Window) ed eventuale riduzione LMR
                 val = -self._negamax(
                     board, max(0, depth - 1 - reduction), -alpha - 1, -alpha, ply + 1
                 )
 
-                # Se la mossa ridotta supera alpha, riesegui la ricerca a profondità e finestra piene!
                 if val > alpha and (reduction > 0 or val < beta):
                     val = -self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
 
@@ -725,6 +856,8 @@ class KasparovEngine:
                     k1, k2 = self.killers.get(ply, (None, None))
                     if move != k1:
                         self.killers[ply] = (move, k1)
+                    if not is_promo:
+                        self.history[board.turn][move.from_square][move.to_square] += depth * depth
                 break
 
         tt_flag = TT_EXACT
@@ -733,10 +866,7 @@ class KasparovEngine:
         elif best_val >= beta:
             tt_flag = TT_LOWER
 
-        if len(self.tt) > 200000:
-            self.tt.clear()
-        self.tt[pos_key] = (depth, tt_flag, _score_to_tt(best_val, ply), best_move)
-
+        self._store_tt(pos_key, depth, tt_flag, _score_to_tt(best_val, ply), best_move)
         return best_val
 
     def _get_policy_priors(self, board: chess.Board, legend_id: str) -> dict:
@@ -744,7 +874,7 @@ class KasparovEngine:
         if not legal_moves:
             return {}
 
-        net = self.policy_models.get(legend_id, self.policy_models["kasparov"])
+        net = self._get_policy_model(legend_id)
         with torch.no_grad():
             inp = self._board_to_tensor(board, self.policy_channels).unsqueeze(0).to(self.device)
             logits = net(inp).squeeze(0)
@@ -766,8 +896,7 @@ class KasparovEngine:
     def _extract_pv_san(self, board: chess.Board, first_move: chess.Move, max_ply: int = 5) -> str:
         """
         Estrae la Principal Variation (PV) in notazione SAN seguendo le mosse
-        della Transposition Table (self.tt) fino a max_ply semimosse.
-        Garantisce il ripristino dello stato di board tramite blocco finally.
+        della Transposition Table (self.tt) indicizzata con Zobrist Hash a 64-bit.
         """
         pv_sans = []
         pushed_count = 0
@@ -785,7 +914,7 @@ class KasparovEngine:
                 if board.is_game_over():
                     break
 
-                tt_key = getattr(board, "_transposition_key", board.fen)()
+                tt_key = chess.polyglot.zobrist_hash(board)
                 if tt_key in visited_keys:
                     break
                 visited_keys.add(tt_key)
@@ -814,6 +943,9 @@ class KasparovEngine:
         return " ".join(pv_sans)
 
     def evaluate_only(self, fen: str, legend: str = "kasparov") -> dict:
+        legend_id = legend.lower() if legend.lower() in LEGENDS_PROFILES else "kasparov"
+        self.current_aggression = LEGENDS_PROFILES[legend_id]["aggression"]
+
         board = chess.Board(fen)
         if board.is_checkmate():
             winner_sign = -1 if board.turn == chess.WHITE else 1
@@ -841,6 +973,7 @@ class KasparovEngine:
     ):
         legend_id = legend.lower() if legend.lower() in LEGENDS_PROFILES else "kasparov"
         profile = LEGENDS_PROFILES[legend_id]
+        self.current_aggression = profile["aggression"]
 
         board = chess.Board(fen)
         if board.is_game_over():
@@ -859,6 +992,10 @@ class KasparovEngine:
         if board.fullmove_number <= 2:
             self.recent_positions.clear()
             self.tt.clear()
+            self._clear_history_tables()
+        else:
+            self._age_history_tables()
+
         current_fen_key = " ".join(fen.split()[:4])
         self.recent_positions.append(current_fen_key)
         seen_positions = (
@@ -890,9 +1027,9 @@ class KasparovEngine:
                 }
             board.pop()
 
-        # 2. Prior dalla Policy Network e dall'Opening Book storico
+        # 2. Prior dalla Policy Network e dall'Opening Book storico (Lazy Loaded)
         policy_priors = self._get_policy_priors(board, legend_id)
-        book = self.opening_books.get(legend_id, {})
+        book = self._get_opening_book(legend_id)
         book_hits = book.get(current_fen_key, {})
         total_book = sum(book_hits.values()) if book_hits else 0
 
@@ -953,7 +1090,6 @@ class KasparovEngine:
         reached_depth = 1
 
         for current_depth in range(1, 5):
-            # A depth=1 disabilita il timeout per garantire almeno 2 ply completi su tutte le mosse
             self.abort_time = 0.0 if current_depth == 1 else (start_time + time_budget)
 
             best_tactical_so_far = -999999
@@ -987,7 +1123,6 @@ class KasparovEngine:
                     key=lambda m: tactical_scores[m] + sum(root_adjustments[m]),
                     reverse=True
                 )
-                # Se abbiamo trovato uno scacco matto forzato, non serve cercare oltre
                 if best_tactical_so_far > 90000:
                     break
 
