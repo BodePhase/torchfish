@@ -2,49 +2,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class KasparovPolicyNet(nn.Module):
-    def __init__(self, num_classes=4544):
-        super(KasparovPolicyNet, self).__init__()
-        
-        # 1. Blocco Estrattore di Feature (Convoluzioni)
-        # Input: [Batch, 14, 8, 8] - 14 canali (pezzi + info), scacchiera 8x8
-        self.conv1 = nn.Conv2d(in_channels=14, out_channels=64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1)
-        
-        # 2. Blocco Classificatore (Fully Connected)
-        # La dimensione dopo le convoluzioni è 256 canali * 8 * 8 = 16384
-        self.fc1 = nn.Linear(in_features=256 * 8 * 8, out_features=1024)
-        
-        # L'output layer DEVE avere esattamente lo stesso numero di neuroni del vocabolario
-        self.fc_out = nn.Linear(in_features=1024, out_features=num_classes)
 
-    def forward(self, x):
-        # Passaggio nei livelli convoluzionali con attivazione ReLU
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        
-        # Appiattimento del tensore spaziale in un vettore 1D per i livelli lineari
-        x = x.view(x.size(0), -1) 
-        
-        # Passaggio nei livelli lineari
-        x = F.relu(self.fc1(x))
-        
-        # OUTPUT LAYER: Restituiamo i "logits" crudi.
-        # NESSUNA ATTIVAZIONE QUI! La CrossEntropyLoss di PyTorch vuole questi valori.
-        logits = self.fc_out(x)
-        
-        return logits
-    
-    def predict_probabilities(self, x):
-        """
-        Funzione helper da usare SOLO in inferenza (server.py / inference.py)
-        quando vogliamo estrarre le percentuali reali per il Filtro di Sicurezza.
-        """
-        # Disabilita il calcolo dei gradienti per risparmiare VRAM e CPU
-        with torch.no_grad():
-            logits = self.forward(x)
-            # Applica il Softmax sulla dimensione delle classi (dim=1)
-            probabilities = F.softmax(logits, dim=1)
-        return probabilities
+class KasparovPolicyNet(nn.Module):
+    def __init__(self, num_classes: int = 4544, in_channels: int = 14):
+        super().__init__()
+        # Stem convoluzionale (conv1 primo parametro per compatibilità con inference.py)
+        self.conv1 = nn.Conv2d(in_channels, 128, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(128)
+
+        # Blocco Residuale 8x8 con BatchNorm2d
+        self.conv2 = nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(128)
+
+        # Policy Head con BatchNorm1d e Dropout
+        self.fc1 = nn.Linear(128 * 8 * 8, 1024, bias=False)
+        self.bn_fc1 = nn.BatchNorm1d(1024)
+        self.dropout = nn.Dropout(p=0.15)
+        self.fc_out = nn.Linear(1024, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.bn1(self.conv1(x)))
+
+        residual = x
+        out = F.relu(self.bn2(self.conv2(x)))
+        out = self.bn3(self.conv3(out))
+        x = F.relu(out + residual)
+
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.bn_fc1(self.fc1(x)))
+        x = self.dropout(x)
+        return self.fc_out(x)

@@ -6,11 +6,13 @@ import os
 import random
 import re
 import time
+
 import chess
 import chess.pgn
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+
 from models.policy_net import KasparovPolicyNet
 
 PIECE_VALUES = {
@@ -22,7 +24,6 @@ PIECE_VALUES = {
     chess.KING: 20000,
 }
 
-# Configurazione percorsi e regex con word-boundary per ciascuna Leggenda
 LEGENDS_META = {
     "kasparov": {
         "name": "Garry Kasparov",
@@ -62,9 +63,13 @@ LEGENDS_META = {
     },
 }
 
+_FEN_CHAR_TO_CH = {
+    "P": 0, "N": 1, "B": 2, "R": 3, "Q": 4, "K": 5,
+    "p": 6, "n": 7, "b": 8, "r": 9, "q": 10, "k": 11,
+}
+
 
 def resolve_pgn_path(meta: dict, custom_pgn: str = None) -> str:
-    """Trova il file PGN specificato o cerca automaticamente un .pgn nella cartella della Leggenda."""
     if custom_pgn:
         if not os.path.exists(custom_pgn):
             raise FileNotFoundError(f"File PGN specificato non trovato: {custom_pgn}")
@@ -92,7 +97,6 @@ def load_valid_uci_set(dict_path: str) -> set:
 
 
 def step1_extract_pgn_to_csv(pgn_path: str, output_csv: str, player_regex: re.Pattern, valid_uci: set) -> int:
-    """Estrae tutte le mosse della Leggenda dal file PGN e genera il CSV per l'Opening Book."""
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     rows = []
     games_matched = 0
@@ -139,7 +143,6 @@ def step1_extract_pgn_to_csv(pgn_path: str, output_csv: str, player_regex: re.Pa
 
 
 def find_tactical_punishment(board: chess.Board, valid_uci: set):
-    """Individua un Matto in 1 o la migliore cattura netta (>= +280 cp) sulla scacchiera."""
     legal_moves = list(board.legal_moves)
 
     for move in legal_moves:
@@ -190,7 +193,6 @@ def step2_augment_tactics(
     valid_uci: set,
     tactical_ratio: float = 0.20
 ) -> int:
-    """Inietta posizioni tattiche sintetiche (Matto in 1 e pezzi in presa) nel dataset della Leggenda."""
     with open(input_csv, "r", encoding="utf-8") as f:
         original_rows = list(csv.DictReader(f))
 
@@ -246,19 +248,14 @@ def step2_augment_tactics(
     return len(combined_rows)
 
 
-_FEN_CHAR_TO_CH = {
-    "P": 0, "N": 1, "B": 2, "R": 3, "Q": 4, "K": 5,
-    "p": 6, "n": 7, "b": 8, "r": 9, "q": 10, "k": 11,
-}
-
-
 def _load_dataset_uint8(csv_path: str, dict_path: str):
     """
-    Codifica il CSV una sola volta in RAM come tensore uint8 [N, 14, 8, 8] identico
-    a dataset_policy.board_to_tensor, evitando os.fork() dopo l'init CUDA in WSL2.
+    Codifica il CSV una sola volta in RAM come tensore uint8 [N, 14, 8, 8]
+    identico bit-a-bit a dataset_policy.board_to_tensor (incluso il canale 13).
     """
     with open(dict_path, "r", encoding="utf-8") as f:
-        move_to_int = json.load(f)["move_to_int"]
+        raw_dict = json.load(f)
+    move_to_int = raw_dict.get("move_to_int", raw_dict)
 
     with open(csv_path, "r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -273,7 +270,7 @@ def _load_dataset_uint8(csv_path: str, dict_path: str):
         parts = row["fen"].split()
         ranks = parts[0].split("/")
         for r_idx, rank_str in enumerate(ranks):
-            board_row = 7 - r_idx  # Traversa 1 = row 0, Traversa 8 = row 7
+            board_row = 7 - r_idx
             col = 0
             for ch in rank_str:
                 if ch.isdigit():
@@ -281,8 +278,28 @@ def _load_dataset_uint8(csv_path: str, dict_path: str):
                 else:
                     b_np[i, _FEN_CHAR_TO_CH[ch], board_row, col] = 1
                     col += 1
+
+        # Canale 12: Turno
         if len(parts) > 1 and parts[1] == "w":
             b_np[i, 12, :, :] = 1
+
+        # Canale 13: Diritti di arrocco (a1, h1, a8, h8) + casa En-Passant
+        if len(parts) > 2 and parts[2] != "-":
+            castling = parts[2]
+            if "Q" in castling:
+                b_np[i, 13, 0, 0] = 1
+            if "K" in castling:
+                b_np[i, 13, 0, 7] = 1
+            if "q" in castling:
+                b_np[i, 13, 7, 0] = 1
+            if "k" in castling:
+                b_np[i, 13, 7, 7] = 1
+
+        if len(parts) > 3 and len(parts[3]) == 2 and parts[3] != "-":
+            ep_file = ord(parts[3][0]) - ord("a")
+            ep_rank = int(parts[3][1]) - 1
+            if 0 <= ep_rank < 8 and 0 <= ep_file < 8:
+                b_np[i, 13, ep_rank, ep_file] = 1
 
         t_np[i] = move_to_int[row["move_uci"]]
 
@@ -298,18 +315,20 @@ def step3_train_policy(
     batch_size: int,
     lr: float,
 ):
-    """Addestra da zero (o esegue fine-tuning) KasparovPolicyNet direttamente da RAM."""
     os.makedirs(os.path.dirname(output_weights), exist_ok=True)
 
-    # 1. Pre-codifica in RAM su singolo processo PRIMA di inizializzare il contesto CUDA
     print(f"\n[Step 3/3] Caricamento dataset '{csv_path}' in RAM...")
     boards_u8, targets_cpu, num_classes = _load_dataset_uint8(csv_path, dict_path)
     num_samples = boards_u8.size(0)
     ram_mb = boards_u8.numel() / (1024 * 1024)
     print(f"  -> {num_samples} posizioni pronte in RAM ({ram_mb:.1f} MB uint8).")
 
-    # 2. Inizializza CUDA solo dopo aver preparato i tensori in RAM (zero fork/IPC)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     try:
         model = KasparovPolicyNet(num_classes=num_classes).to(device)
     except TypeError:
@@ -332,12 +351,16 @@ def step3_train_policy(
     for epoch in range(1, epochs + 1):
         model.train()
         perm = torch.randperm(num_samples)
-        total_loss = 0.0
-        correct = 0
+        total_loss_gpu = torch.zeros(1, dtype=torch.float64, device=device)
+        correct_gpu = torch.zeros(1, dtype=torch.int64, device=device)
+        trained_samples = 0
         t0 = time.perf_counter()
 
         for start_idx in range(0, num_samples, batch_size):
             batch_idx = perm[start_idx : start_idx + batch_size]
+            if batch_idx.numel() < 2:
+                continue
+
             boards = boards_u8[batch_idx].to(device=device, dtype=torch.float32)
             targets = targets_cpu[batch_idx].to(device=device)
 
@@ -348,12 +371,13 @@ def step3_train_policy(
             optimizer.step()
 
             bsz = boards.size(0)
-            total_loss += loss.item() * bsz
-            correct += (logits.argmax(dim=-1) == targets).sum().item()
+            total_loss_gpu += loss.detach().to(torch.float64) * bsz
+            correct_gpu += (logits.detach().argmax(dim=-1) == targets).sum()
+            trained_samples += bsz
 
         scheduler.step()
-        avg_loss = total_loss / max(1, num_samples)
-        acc = (correct / max(1, num_samples)) * 100.0
+        avg_loss = total_loss_gpu.item() / max(1, trained_samples)
+        acc = (correct_gpu.item() / max(1, trained_samples)) * 100.0
         elapsed = time.perf_counter() - t0
         print(f"  Epoca {epoch:02d}/{epochs:02d} | Loss: {avg_loss:.4f} | Acc: {acc:.2f}% | Tempo: {elapsed:.2f}s")
 

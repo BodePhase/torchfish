@@ -19,20 +19,26 @@ client = TestClient(app)
 
 
 def test_board_to_tensor_orientation_and_shape():
-    """Verifica che il tensore sia 14x8x8 e che la Traversa 1 sia mappata sulla riga 0 (R1)."""
-    board = chess.Board()
+    """Verifica che il tensore sia 14x8x8 e codifichi traverse, turno, arrocco ed en-passant."""
+    board = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
     tensor = board_to_tensor(board)
 
     assert tensor.shape == (14, 8, 8)
     assert tensor.dtype == torch.float32
-    # Pedone Bianco in e2 (rank=1, file=4) -> canale 0, riga 1, colonna 4
-    assert tensor[0, 1, 4].item() == 1.0
+    # Pedone Bianco in e4 (rank=3, file=4) -> canale 0, riga 3, colonna 4
+    assert tensor[0, 3, 4].item() == 1.0
     # Re Bianco in e1 (rank=0, file=4) -> canale 5, riga 0, colonna 4
     assert tensor[5, 0, 4].item() == 1.0
-    # Re Nero in e8 (rank=7, file=4) -> canale 11 (5+6), riga 7, colonna 4
+    # Re Nero in e8 (rank=7, file=4) -> canale 11, riga 7, colonna 4
     assert tensor[11, 7, 4].item() == 1.0
-    # Turno del Bianco -> canale 12 a 1.0
-    assert tensor[12, 0, 0].item() == 1.0
+    # Turno del Nero -> canale 12 a 0.0
+    assert tensor[12, 0, 0].item() == 0.0
+    # Canale 13: 4 diritti di arrocco (a1, h1, a8, h8) + casa en-passant e3 (rank=2, file=4)
+    assert tensor[13, 0, 0].item() == 1.0
+    assert tensor[13, 0, 7].item() == 1.0
+    assert tensor[13, 7, 0].item() == 1.0
+    assert tensor[13, 7, 7].item() == 1.0
+    assert tensor[13, 2, 4].item() == 1.0
 
 
 def test_mate_in_one_execution():
