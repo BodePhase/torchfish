@@ -59,7 +59,7 @@ KING_ATTACK_WEIGHT = {
 
 NON_KING_PIECES = (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
 
-# Profili comportamentali delle Leggende
+# Profili comportamentali e psicologia di patta delle Leggende
 LEGENDS_PROFILES = {
     "kasparov": {
         "name": "Garry Kasparov",
@@ -69,6 +69,11 @@ LEGENDS_PROFILES = {
         "book_path": "data/gm_kasparov/kasparov_moves.csv",
         "style_bonus_cp": 32.0,
         "aggression": 1.20,
+        "min_draw_move": 26,
+        "draw_max_adv_cp": 15,
+        "quote_reject_early": "Garry Kasparov rifiuta: «La posizione è ancora piena di energia dinamica!»",
+        "quote_reject_winning": "Garry Kasparov rifiuta: «Ho l'iniziativa, non firmerò mai la patta qui!»",
+        "quote_accept": "Garry Kasparov accetta la patta: «Equilibrio dinamico perfetto, ottima partita.»",
     },
     "tal": {
         "name": "Mikhail Tal",
@@ -78,6 +83,11 @@ LEGENDS_PROFILES = {
         "book_path": "data/gm_tal/tal_moves.csv",
         "style_bonus_cp": 38.0,
         "aggression": 1.40,
+        "min_draw_move": 28,
+        "draw_max_adv_cp": 12,
+        "quote_reject_early": "Mikhail Tal sorride e rifiuta: «Ci sono ancora troppi pezzi per non cercare un sacrificio!»",
+        "quote_reject_winning": "Mikhail Tal rifiuta: «L'attacco sul Re è appena cominciato!»",
+        "quote_accept": "Mikhail Tal accetta la patta: «Non sono rimaste più magie in questa scacchiera!»",
     },
     "karpov": {
         "name": "Anatoly Karpov",
@@ -87,6 +97,11 @@ LEGENDS_PROFILES = {
         "book_path": "data/gm_karpov/karpov_moves.csv",
         "style_bonus_cp": 25.0,
         "aggression": 0.90,
+        "min_draw_move": 16,
+        "draw_max_adv_cp": 30,
+        "quote_reject_early": "Anatoly Karpov rifiuta: «È troppo presto, definiamo prima la struttura pedonale.»",
+        "quote_reject_winning": "Anatoly Karpov rifiuta: «Ho una pressione posizionale duratura senza rischi.»",
+        "quote_accept": "Anatoly Karpov accetta la patta: «Equilibrio posizionale solido, risultato corretto.»",
     },
     "carlsen": {
         "name": "Magnus Carlsen",
@@ -96,6 +111,11 @@ LEGENDS_PROFILES = {
         "book_path": "data/gm_carlsen/carlsen_moves.csv",
         "style_bonus_cp": 22.0,
         "aggression": 1.05,
+        "min_draw_move": 30,
+        "draw_max_adv_cp": 8,
+        "quote_reject_early": "Magnus Carlsen rifiuta: «Giochiamo ancora, c'è molto margine per creare problemi.»",
+        "quote_reject_winning": "Magnus Carlsen rifiuta: «Posso premere su questo finale senza rischiare nulla.»",
+        "quote_accept": "Magnus Carlsen accetta la patta: «Nessun margine reale per forzare, patta giusta.»",
     },
 }
 
@@ -369,7 +389,6 @@ class KasparovEngine:
         self.num_classes = len(self.move_to_idx)
 
         # 2. Lazy Loading: pre-carica solo il modello di default (Kasparov)
-        #    Le altre Leggende e gli Opening Book vengono caricati on-demand al primo utilizzo
         self.policy_models = {}
         self.opening_books = {}
         self.policy_channels = 14
@@ -475,6 +494,72 @@ class KasparovEngine:
         if tensor.shape[0] != channels:
             return tensor[:channels]
         return tensor
+
+    def _compute_game_phase(self, board: chess.Board) -> int:
+        phase = 0
+        for pt in NON_KING_PIECES:
+            w_count = len(board.pieces(pt, chess.WHITE))
+            b_count = len(board.pieces(pt, chess.BLACK))
+            phase += PHASE_WEIGHT[pt] * (w_count + b_count)
+        return min(24, phase)
+
+    def _evaluate_draw_for_color(
+        self,
+        board: chess.Board,
+        legend_id: str,
+        cp_white: int,
+        ai_is_white: bool,
+        game_phase: int
+    ) -> dict:
+        """
+        Valuta se la Leggenda (giocando con il colore specificato da ai_is_white)
+        accetta o rifiuta una proposta di patta nella posizione corrente.
+        """
+        profile = LEGENDS_PROFILES.get(legend_id, LEGENDS_PROFILES["kasparov"])
+        ai_cp = cp_white if ai_is_white else -cp_white
+        fullmove = board.fullmove_number
+        max_adv = profile["draw_max_adv_cp"]
+
+        # 1. Ripetizione imminente o regola delle 50 mosse avanzata
+        if (board.is_repetition(2) or board.halfmove_clock >= 40) and ai_cp <= max_adv + 20:
+            return {
+                "accepted": True,
+                "reason": f"{profile['name']} accetta la patta: «Posizione ripetuta, inutile forzare oltre.»",
+            }
+
+        # 2. Se la Leggenda è in netto svantaggio (<= -0.85 pedoni) dopo l'apertura, accetta con sollievo
+        if fullmove >= 10 and ai_cp <= -85:
+            return {
+                "accepted": True,
+                "reason": f"{profile['name']} accetta prontamente: «Una patta preziosa in una posizione difficile!»",
+            }
+
+        # 3. Se la Leggenda è in vantaggio oltre la propria soglia stilistica, rifiuta sempre
+        if ai_cp > max_adv:
+            return {
+                "accepted": False,
+                "reason": profile["quote_reject_winning"],
+            }
+
+        # 4. Controllo mossa minima (ridotta di 8 mosse se si è già in finale semplificato)
+        effective_min_move = profile["min_draw_move"] - (8 if game_phase <= 8 else 0)
+        if fullmove < effective_min_move:
+            return {
+                "accepted": False,
+                "reason": profile["quote_reject_early"],
+            }
+
+        # 5. Nel mediogioco complesso (game_phase >= 14), Kasparov, Tal e Carlsen rifiutano prima della mossa 36
+        if legend_id in ("kasparov", "tal", "carlsen") and game_phase >= 14 and fullmove < 36:
+            return {
+                "accepted": False,
+                "reason": profile["quote_reject_early"],
+            }
+
+        return {
+            "accepted": True,
+            "reason": profile["quote_accept"],
+        }
 
     # =========================================================================
     # VALUTAZIONE PeSTO TAPERED + STRUTTURA PEDONI + KING SAFETY + MOP-UP
@@ -734,7 +819,6 @@ class KasparovEngine:
                 return
 
         if len(self.tt) >= MAX_TT_SIZE and existing is None:
-            # Rimuove solo i nodi foglia superficiali (depth <= 1) preservando le linee profonde
             shallow_keys = [k for k, v in self.tt.items() if v[0] <= 1]
             if shallow_keys:
                 for k in shallow_keys[: len(shallow_keys) // 2 + 1]:
@@ -947,18 +1031,42 @@ class KasparovEngine:
         self.current_aggression = LEGENDS_PROFILES[legend_id]["aggression"]
 
         board = chess.Board(fen)
+        game_phase = self._compute_game_phase(board)
+
         if board.is_checkmate():
             winner_sign = -1 if board.turn == chess.WHITE else 1
-            return {"eval_white": float(winner_sign * 99.0), "mate_in": winner_sign * 1}
+            return {
+                "eval_white": float(winner_sign * 99.0),
+                "mate_in": winner_sign * 1,
+                "game_phase": game_phase,
+                "draw_offer": {
+                    "w": {"accepted": False, "reason": "Partita già conclusa."},
+                    "b": {"accepted": False, "reason": "Partita già conclusa."},
+                },
+            }
         if board.is_game_over():
-            return {"eval_white": 0.0, "mate_in": None}
+            return {
+                "eval_white": 0.0,
+                "mate_in": None,
+                "game_phase": game_phase,
+                "draw_offer": {
+                    "w": {"accepted": True, "reason": "Posizione già patta."},
+                    "b": {"accepted": True, "reason": "Posizione già patta."},
+                },
+            }
 
         self.abort_time = 0.0
         cp_mover = self._quiescence_cp(board, -99999, 99999, 0)
         cp_white = cp_mover if board.turn == chess.WHITE else -cp_mover
+
         return {
             "eval_white": round(cp_white / 100.0, 2),
-            "mate_in": None
+            "mate_in": None,
+            "game_phase": game_phase,
+            "draw_offer": {
+                "w": self._evaluate_draw_for_color(board, legend_id, cp_white, True, game_phase),
+                "b": self._evaluate_draw_for_color(board, legend_id, cp_white, False, game_phase),
+            },
         }
 
     # =========================================================================
@@ -976,6 +1084,8 @@ class KasparovEngine:
         self.current_aggression = profile["aggression"]
 
         board = chess.Board(fen)
+        game_phase = self._compute_game_phase(board)
+
         if board.is_game_over():
             eval_info = self.evaluate_only(fen, legend_id)
             return {
@@ -987,6 +1097,8 @@ class KasparovEngine:
                 "legend": legend_id,
                 "eval_white": eval_info["eval_white"],
                 "mate_in": eval_info["mate_in"],
+                "game_phase": game_phase,
+                "draw_offer": eval_info["draw_offer"],
             }
 
         if board.fullmove_number <= 2:
@@ -1024,6 +1136,11 @@ class KasparovEngine:
                     "legend": legend_id,
                     "eval_white": 99.0 if ai_is_white else -99.0,
                     "mate_in": 1 if ai_is_white else -1,
+                    "game_phase": game_phase,
+                    "draw_offer": {
+                        "w": {"accepted": False, "reason": "Scacco matto forzato in 1."},
+                        "b": {"accepted": False, "reason": "Scacco matto forzato in 1."},
+                    },
                 }
             board.pop()
 
@@ -1163,6 +1280,7 @@ class KasparovEngine:
 
         best_move_obj = top_slice[0]["move_obj"]
         board.push(best_move_obj)
+        next_game_phase = self._compute_game_phase(board)
         self.recent_positions.append(" ".join(board.fen().split()[:4]))
         board.pop()
 
@@ -1182,6 +1300,7 @@ class KasparovEngine:
         ]
 
         best = top_moves[0]
+        best_cp_white = int(round(best["eval_white"] * 100))
         mate_in = None
         if abs(top_slice[0]["tactical_cp"]) > 90000:
             ply_to_mate = max(1, (99000 - abs(top_slice[0]["tactical_cp"])) // 100)
@@ -1197,6 +1316,11 @@ class KasparovEngine:
             "legend": legend_id,
             "eval_white": best["eval_white"],
             "mate_in": mate_in,
+            "game_phase": next_game_phase,
+            "draw_offer": {
+                "w": self._evaluate_draw_for_color(board, legend_id, best_cp_white, True, next_game_phase),
+                "b": self._evaluate_draw_for_color(board, legend_id, best_cp_white, False, next_game_phase),
+            },
             "search_depth": reached_depth,
             "nodes": self.nodes_searched
         }

@@ -14,10 +14,10 @@ const PIECE_SYMBOLS = {
 const PROMOTION_PIECES = ['q', 'r', 'b', 'n'];
 
 const LEGENDS = [
-  { id: 'kasparov', name: 'Garry Kasparov', badge: '🔥', title: 'Il Mostro di Baku', desc: 'Dinamico, offensivo, iniziativa massima' },
-  { id: 'tal', name: 'Mikhail Tal', badge: '⚡', title: 'Il Mago di Riga', desc: 'Sacrifici speculativi e attacchi al Re' },
-  { id: 'karpov', name: 'Anatoly Karpov', badge: '🛡️', title: 'Il Boa Costrittore', desc: 'Profilassi posizionale, zero rischi' },
-  { id: 'carlsen', name: 'Magnus Carlsen', badge: '🧊', title: 'Il Maestro dei Finali', desc: 'Precisione universale e pressione costante' },
+  { id: 'kasparov', name: 'Garry Kasparov', badge: '🔥', title: 'Il Mostro di Baku', desc: 'Dinamico, offensivo, iniziativa massima', minDrawPly: 52, drawMargin: 0.16 },
+  { id: 'tal', name: 'Mikhail Tal', badge: '⚡', title: 'Il Mago di Riga', desc: 'Sacrifici speculativi e attacchi al Re', minDrawPly: 56, drawMargin: 0.14 },
+  { id: 'karpov', name: 'Anatoly Karpov', badge: '🛡️', title: 'Il Boa Costrittore', desc: 'Profilassi posizionale, zero rischi', minDrawPly: 34, drawMargin: 0.28 },
+  { id: 'carlsen', name: 'Magnus Carlsen', badge: '🧊', title: 'Il Maestro dei Finali', desc: 'Precisione universale e pressione costante', minDrawPly: 60, drawMargin: 0.10 },
 ];
 
 const SOUND_URLS = {
@@ -151,6 +151,37 @@ const analyzeMoveHistory = (snapshots) => {
   };
 };
 
+// Verifica se due Leggende in modalità IA vs IA concordano automaticamente la patta
+const checkSpectatorMutualDraw = (snapshotsList, wLegendId, bLegendId, gamePhase = 24) => {
+  if (snapshotsList.length < 36) return null;
+
+  const wProfile = LEGENDS.find((l) => l.id === wLegendId) || LEGENDS[0];
+  const bProfile = LEGENDS.find((l) => l.id === bLegendId) || LEGENDS[0];
+
+  const endgameDiscount = gamePhase <= 8 ? 16 : 0;
+  const requiredPly = Math.max(32, Math.max(wProfile.minDrawPly, bProfile.minDrawPly) - endgameDiscount);
+
+  if (snapshotsList.length < requiredPly) return null;
+
+  // Controlla le ultime 6 semimosse consecutive: nessuna cattura recente e valutazione sempre in fascia di parità
+  const recentWindow = snapshotsList.slice(-6);
+  const maxAllowedMargin = gamePhase <= 6 ? 0.25 : Math.min(wProfile.drawMargin, bProfile.drawMargin) + 0.06;
+
+  const isLockedEqual = recentWindow.every(
+    (s) => (s.mateIn === null || s.mateIn === undefined) && Math.abs(s.evalWhite ?? 0) <= maxAllowedMargin
+  );
+  const noRecentCaptures = recentWindow.slice(-3).every((s) => !s.captured);
+
+  if (isLockedEqual && noRecentCaptures) {
+    const fullMoves = Math.ceil((snapshotsList.length - 1) / 2);
+    return {
+      title: 'Patta tra Grandi Maestri (½-½)',
+      subtitle: `${wProfile.name} e ${bProfile.name} concordano la patta per equilibrio alla mossa ${fullMoves}`,
+    };
+  }
+  return null;
+};
+
 // Grafico SVG interattivo dell'andamento della valutazione
 function EvalGraph({ snapshots, currentStep, onSelectStep }) {
   const width = 300;
@@ -243,10 +274,11 @@ export default function App() {
   const abortControllerRef = useRef(null);
   const moveListRef = useRef(null);
   const audioCacheRef = useRef({});
+  const drawToastTimerRef = useRef(null);
+  const aiDrawCooldownPlyRef = useRef(0);
 
-  // Ogni snapshot salva anche evalWhite e mateIn per aggiornare la barra scorrendo lo storico
   const [snapshots, setSnapshots] = useState([
-    { fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null }
+    { fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null, gamePhase: 24 }
   ]);
   const [viewIndex, setViewIndex] = useState(0);
 
@@ -257,6 +289,10 @@ export default function App() {
   const [rightClickedSquares, setRightClickedSquares] = useState({});
   const [pendingPromotion, setPendingPromotion] = useState(null);
   const [resignedWinner, setResignedWinner] = useState(null);
+  const [agreedDraw, setAgreedDraw] = useState(null);
+  const [drawFeedback, setDrawFeedback] = useState(null);
+  const [aiDrawProposal, setAiDrawProposal] = useState(null);
+  const [lastDrawOfferPly, setLastDrawOfferPly] = useState(-1);
   const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [], isBook: false });
   const [copiedBadge, setCopiedBadge] = useState(null);
   const [apiError, setApiError] = useState(null);
@@ -264,7 +300,7 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [showAIArrows, setShowAIArrows] = useState(false);
 
-  // Stati Blocco 1: Import FEN & Modalità Scontro tra Leggende (IA vs IA)
+  // Stati Import FEN & Modalità Scontro tra Leggende (IA vs IA)
   const [fenInput, setFenInput] = useState('');
   const [fenError, setFenError] = useState('');
   const [isSpectatorMode, setIsSpectatorMode] = useState(false);
@@ -285,6 +321,16 @@ export default function App() {
       audio.volume = 0.75;
       audioCacheRef.current[key] = audio;
     });
+  }, []);
+
+  const showTemporaryDrawFeedback = useCallback((accepted, message) => {
+    if (drawToastTimerRef.current) {
+      clearTimeout(drawToastTimerRef.current);
+    }
+    setDrawFeedback({ accepted, message });
+    drawToastTimerRef.current = setTimeout(() => {
+      setDrawFeedback(null);
+    }, 4500);
   }, []);
 
   const playMoveSound = useCallback((moveObj, chessInstance) => {
@@ -321,9 +367,12 @@ export default function App() {
     if (resignedWinner) {
       return { title: 'Partita Terminata', subtitle: `Abbandono — Vince ${resignedWinner}` };
     }
+    if (agreedDraw) {
+      return agreedDraw;
+    }
     const liveGame = new Chess(snapshots[snapshots.length - 1].fen);
     return detectGameOver(liveGame, activeLegendObj.name);
-  }, [snapshots, resignedWinner, activeLegendObj.name]);
+  }, [snapshots, resignedWinner, agreedDraw, activeLegendObj.name]);
 
   const legalMovesForSelected = useMemo(() => {
     if (!moveFrom || isViewingHistory || gameOverStatus || isSpectatorMode) return [];
@@ -365,7 +414,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [snapshots, playMoveSound]);
 
-  const makeAIMove = useCallback(async (currentFen, legendToUse = selectedLegend, historyFens = []) => {
+  const makeAIMove = useCallback(async (currentFen, legendToUse = selectedLegend, historyFens = [], spectatorActive = isSpectatorMode) => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -404,6 +453,7 @@ export default function App() {
           const computedMate = isCheckmateNow
             ? (masterGameRef.current.turn() === 'w' ? -1 : 1)
             : (data.mate_in ?? null);
+          const currentPhase = data.game_phase ?? 24;
 
           if (isOverNow) {
             setIsSpectatorMode(false);
@@ -421,10 +471,39 @@ export default function App() {
                 to: moveObj.to,
                 captured: moveObj.captured,
                 evalWhite: data.eval_white ?? prev[prev.length - 1].evalWhite,
-                mateIn: computedMate
+                mateIn: computedMate,
+                gamePhase: currentPhase
               }
             ];
             setViewIndex(next.length - 1);
+
+            // 1. In modalità Scontro tra Leggende (IA vs IA), verifica accordo di patta tra i 2 GM
+            if (!isOverNow && spectatorActive) {
+              const mutualDraw = checkSpectatorMutualDraw(next, whiteLegend, blackLegend, currentPhase);
+              if (mutualDraw) {
+                setIsSpectatorMode(false);
+                setAgreedDraw(mutualDraw);
+                if (soundEnabled && audioCacheRef.current.gameEnd) {
+                  audioCacheRef.current.gameEnd.currentTime = 0;
+                  audioCacheRef.current.gameEnd.play().catch(() => {});
+                }
+              }
+            }
+
+            // 2. Contro l'utente umano: se siamo in un finale molto pari da 6 semimosse, la Leggenda propone patta
+            if (!isOverNow && !spectatorActive && next.length >= 42 && next.length > aiDrawCooldownPlyRef.current) {
+              const aiSide = playerColor === 'w' ? 'b' : 'w';
+              const aiDecision = data.draw_offer?.[aiSide];
+              const lastSixEqual = next.slice(-6).every(
+                (s) => (s.mateIn === null || s.mateIn === undefined) && Math.abs(s.evalWhite ?? 0) <= 0.18
+              );
+              if (aiDecision?.accepted && currentPhase <= 10 && lastSixEqual) {
+                const legObj = LEGENDS.find((l) => l.id === legendToUse) || LEGENDS[0];
+                setAiDrawProposal(`${legObj.badge} ${legObj.name} ti propone la patta (½-½).`);
+                aiDrawCooldownPlyRef.current = next.length + 12;
+              }
+            }
+
             return next;
           });
 
@@ -446,7 +525,7 @@ export default function App() {
         setKasparovThinking(false);
       }
     }
-  }, [selectedLegend, playMoveSound]);
+  }, [selectedLegend, isSpectatorMode, whiteLegend, blackLegend, playerColor, soundEnabled, playMoveSound]);
 
   // Modalità Scontro tra Leggende (Auto-Play IA vs IA)
   useEffect(() => {
@@ -462,7 +541,7 @@ export default function App() {
     const historyFens = snapshots.slice(-16).map((s) => s.fen);
 
     const timer = setTimeout(() => {
-      makeAIMove(latestFen, activeTurnLegend, historyFens);
+      makeAIMove(latestFen, activeTurnLegend, historyFens, true);
     }, 320);
 
     return () => clearTimeout(timer);
@@ -486,6 +565,8 @@ export default function App() {
       const quickEval = Number(((matNow.whiteAdvantage - matNow.blackAdvantage) || 0).toFixed(1));
 
       playMoveSound(moveObj, masterGameRef.current);
+      setAiDrawProposal(null);
+      setDrawFeedback(null);
 
       let historyFensForAI = [];
       setSnapshots((prev) => {
@@ -498,7 +579,8 @@ export default function App() {
             to: moveObj.to,
             captured: moveObj.captured,
             evalWhite: userMate ? (userMate > 0 ? 99.0 : -99.0) : quickEval,
-            mateIn: userMate
+            mateIn: userMate,
+            gamePhase: prev[prev.length - 1].gamePhase ?? 24
           }
         ];
         historyFensForAI = next.slice(-16).map((s) => s.fen);
@@ -518,7 +600,9 @@ export default function App() {
             if (evalData && typeof evalData.eval_white === 'number') {
               setSnapshots((prev) =>
                 prev.map((snap) =>
-                  snap.fen === newFen ? { ...snap, evalWhite: evalData.eval_white } : snap
+                  snap.fen === newFen
+                    ? { ...snap, evalWhite: evalData.eval_white, gamePhase: evalData.game_phase ?? snap.gamePhase }
+                    : snap
                 )
               );
             }
@@ -532,7 +616,7 @@ export default function App() {
 
       const isOver = masterGameRef.current.isGameOver?.() ?? masterGameRef.current.game_over?.();
       if (!isOver) {
-        setTimeout(() => makeAIMove(newFen, selectedLegend, historyFensForAI), 40);
+        setTimeout(() => makeAIMove(newFen, selectedLegend, historyFensForAI, false), 40);
       }
       return true;
     } catch {
@@ -622,7 +706,7 @@ export default function App() {
     }
     setIsSpectatorMode(false);
     masterGameRef.current = new Chess();
-    setSnapshots([{ fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null }]);
+    setSnapshots([{ fen: INITIAL_FEN, san: null, from: null, to: null, evalWhite: 0.2, mateIn: null, gamePhase: 24 }]);
     setViewIndex(0);
     setPlayerColor(color);
     setKasparovThinking(false);
@@ -630,11 +714,16 @@ export default function App() {
     setPendingPromotion(null);
     setRightClickedSquares({});
     setResignedWinner(null);
+    setAgreedDraw(null);
+    setDrawFeedback(null);
+    setAiDrawProposal(null);
+    setLastDrawOfferPly(-1);
+    aiDrawCooldownPlyRef.current = 0;
     setApiError(null);
     setTelemetry({ confidence: null, topMoves: [], isBook: false });
 
     if (color === 'b') {
-      setTimeout(() => makeAIMove(INITIAL_FEN, legendId, [INITIAL_FEN]), 150);
+      setTimeout(() => makeAIMove(INITIAL_FEN, legendId, [INITIAL_FEN], false), 150);
     }
   };
 
@@ -656,6 +745,10 @@ export default function App() {
       setPendingPromotion(null);
       setRightClickedSquares({});
       setResignedWinner(null);
+      setAgreedDraw(null);
+      setDrawFeedback(null);
+      setAiDrawProposal(null);
+      setLastDrawOfferPly(-1);
 
       const validFen = testBoard.fen();
       masterGameRef.current = new Chess(validFen);
@@ -667,6 +760,7 @@ export default function App() {
         to: null,
         evalWhite: 0.0,
         mateIn: null,
+        gamePhase: 24,
       };
       setSnapshots([initialSnap]);
       setViewIndex(0);
@@ -683,6 +777,7 @@ export default function App() {
           ...initialSnap,
           evalWhite: data.eval_white ?? 0.0,
           mateIn: data.mate_in ?? null,
+          gamePhase: data.game_phase ?? 24,
         }]);
       }
     } catch {
@@ -696,11 +791,72 @@ export default function App() {
     startNewGame(nextColor, selectedLegend);
   };
 
+  const handleOfferDraw = async () => {
+    if (gameOverStatus || isSpectatorMode || snapshots.length < 6) return;
+    if (lastDrawOfferPly === snapshots.length) return;
+
+    // Se la Leggenda aveva già proposto patta, l'offerta la accetta immediatamente
+    if (aiDrawProposal) {
+      handleAcceptAiDraw();
+      return;
+    }
+
+    setLastDrawOfferPly(snapshots.length);
+    const latestFen = snapshots[snapshots.length - 1].fen;
+    const aiSide = playerColor === 'w' ? 'b' : 'w';
+
+    try {
+      const res = await fetch(`${API_BASE}/api/eval_only`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fen: latestFen, legend: selectedLegend }),
+      });
+      if (!res.ok) return;
+
+      const data = await res.json();
+      const decision = data.draw_offer?.[aiSide];
+      if (!decision) return;
+
+      if (decision.accepted) {
+        if (abortControllerRef.current) abortControllerRef.current.abort();
+        setKasparovThinking(false);
+        setAgreedDraw({
+          title: 'Patta per Accordo (½-½)',
+          subtitle: decision.reason,
+        });
+        showTemporaryDrawFeedback(true, decision.reason);
+        if (soundEnabled && audioCacheRef.current.gameEnd) {
+          audioCacheRef.current.gameEnd.currentTime = 0;
+          audioCacheRef.current.gameEnd.play().catch(() => {});
+        }
+      } else {
+        showTemporaryDrawFeedback(false, decision.reason);
+      }
+    } catch {
+      showTemporaryDrawFeedback(false, 'Impossibile verificare la proposta di patta con il server.');
+    }
+  };
+
+  const handleAcceptAiDraw = () => {
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    setKasparovThinking(false);
+    setAiDrawProposal(null);
+    setAgreedDraw({
+      title: 'Patta per Accordo (½-½)',
+      subtitle: `Patta concordata su proposta di ${activeLegendObj.name}`,
+    });
+    if (soundEnabled && audioCacheRef.current.gameEnd) {
+      audioCacheRef.current.gameEnd.currentTime = 0;
+      audioCacheRef.current.gameEnd.play().catch(() => {});
+    }
+  };
+
   const handleResign = () => {
     if (gameOverStatus) return;
     if (abortControllerRef.current) abortControllerRef.current.abort();
     setIsSpectatorMode(false);
     setKasparovThinking(false);
+    setAiDrawProposal(null);
     setResignedWinner(activeLegendObj.name);
     if (soundEnabled && audioCacheRef.current.gameEnd) {
       audioCacheRef.current.gameEnd.currentTime = 0;
@@ -912,7 +1068,7 @@ export default function App() {
 
       {/* COLONNA LATERALE: SELETTORE LEGGENDE, TELEMETRIA, GRAFICO, STORICO E CONTROLLI */}
       <div className="sidebar-column">
-        {/* SELETTORE DI LEGGENDE (PUNTO C) */}
+        {/* SELETTORE DI LEGGENDE */}
         <div className="legend-selector-panel">
           <div className="legend-panel-label">👑 Avversario (Stile Grande Maestro)</div>
           <div className="legend-grid">
@@ -1110,8 +1266,28 @@ export default function App() {
           })}
         </div>
 
-        {/* BARRA CONTROLLI PARTITA + SCONTRO LEGGENDE + IMPORT FEN */}
+        {/* BARRA CONTROLLI PARTITA + PROPOSTA PATTA + SCONTRO LEGGENDE + IMPORT FEN */}
         <div className="action-bar">
+          {aiDrawProposal && !gameOverStatus && (
+            <div className="draw-proposal-banner">
+              <span>{aiDrawProposal}</span>
+              <div className="draw-proposal-actions">
+                <button type="button" className="btn-draw-accept" onClick={handleAcceptAiDraw}>
+                  Accetta ½-½
+                </button>
+                <button type="button" className="btn-draw-decline" onClick={() => setAiDrawProposal(null)}>
+                  Rifiuta
+                </button>
+              </div>
+            </div>
+          )}
+
+          {drawFeedback && (
+            <div className={`draw-feedback-toast ${drawFeedback.accepted ? 'accepted' : 'rejected'}`}>
+              {drawFeedback.message}
+            </div>
+          )}
+
           <div className="spectator-controls">
             <div className="spectator-header">
               <span>⚔️ Scontro tra Leggende</span>
@@ -1155,17 +1331,30 @@ export default function App() {
 
           <div className="action-row">
             <button className="ctrl-btn primary" onClick={() => startNewGame(playerColor, selectedLegend)}>
-              Nuova Partita
+              Nuova
             </button>
             <button className="ctrl-btn" onClick={handleFlipColor} title="Inverti colore e scacchiera">
               🔄 Inverti
+            </button>
+            <button
+              className="ctrl-btn draw-btn"
+              onClick={handleOfferDraw}
+              disabled={
+                Boolean(gameOverStatus) ||
+                isSpectatorMode ||
+                snapshots.length < 6 ||
+                lastDrawOfferPly === snapshots.length
+              }
+              title="Proponi la patta alla Leggenda (disponibile dopo 3 mosse)"
+            >
+              🤝 Patta
             </button>
             <button
               className="ctrl-btn danger"
               onClick={handleResign}
               disabled={Boolean(gameOverStatus) || snapshots.length < 2}
             >
-              🏳️ Abbandona
+              🏳️ Resa
             </button>
           </div>
           <div className="action-row export-row">
