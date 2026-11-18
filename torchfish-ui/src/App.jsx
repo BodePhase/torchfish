@@ -163,7 +163,6 @@ const checkSpectatorMutualDraw = (snapshotsList, wLegendId, bLegendId, gamePhase
 
   if (snapshotsList.length < requiredPly) return null;
 
-  // Controlla le ultime 6 semimosse consecutive: nessuna cattura recente e valutazione sempre in fascia di parità
   const recentWindow = snapshotsList.slice(-6);
   const maxAllowedMargin = gamePhase <= 6 ? 0.25 : Math.min(wProfile.drawMargin, bProfile.drawMargin) + 0.06;
 
@@ -293,7 +292,7 @@ export default function App() {
   const [drawFeedback, setDrawFeedback] = useState(null);
   const [aiDrawProposal, setAiDrawProposal] = useState(null);
   const [lastDrawOfferPly, setLastDrawOfferPly] = useState(-1);
-  const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [], isBook: false });
+  const [telemetry, setTelemetry] = useState({ confidence: null, topMoves: [], isBook: false, bookColor: null });
   const [copiedBadge, setCopiedBadge] = useState(null);
   const [apiError, setApiError] = useState(null);
 
@@ -477,7 +476,6 @@ export default function App() {
             ];
             setViewIndex(next.length - 1);
 
-            // 1. In modalità Scontro tra Leggende (IA vs IA), verifica accordo di patta tra i 2 GM
             if (!isOverNow && spectatorActive) {
               const mutualDraw = checkSpectatorMutualDraw(next, whiteLegend, blackLegend, currentPhase);
               if (mutualDraw) {
@@ -490,7 +488,6 @@ export default function App() {
               }
             }
 
-            // 2. Contro l'utente umano: se siamo in un finale molto pari da 6 semimosse, la Leggenda propone patta
             if (!isOverNow && !spectatorActive && next.length >= 42 && next.length > aiDrawCooldownPlyRef.current) {
               const aiSide = playerColor === 'w' ? 'b' : 'w';
               const aiDecision = data.draw_offer?.[aiSide];
@@ -510,7 +507,8 @@ export default function App() {
           setTelemetry({
             confidence: data.confidence ?? null,
             topMoves: data.top_moves ?? [{ san: data.best_move_san, uci: data.best_move_uci, pv_san: data.best_move_san, prob: data.confidence ?? 100 }],
-            isBook: Boolean(data.is_book_move)
+            isBook: Boolean(data.is_book_move),
+            bookColor: data.is_book_move ? moveObj.color : null,
           });
         }
       }
@@ -588,7 +586,6 @@ export default function App() {
         return next;
       });
 
-      // Aggiorna la Eval Bar con la valutazione di quiescenza reale subito dopo la mossa utente
       if (!userMate) {
         fetch(`${API_BASE}/api/eval_only`, {
           method: 'POST',
@@ -720,7 +717,7 @@ export default function App() {
     setLastDrawOfferPly(-1);
     aiDrawCooldownPlyRef.current = 0;
     setApiError(null);
-    setTelemetry({ confidence: null, topMoves: [], isBook: false });
+    setTelemetry({ confidence: null, topMoves: [], isBook: false, bookColor: null });
 
     if (color === 'b') {
       setTimeout(() => makeAIMove(INITIAL_FEN, legendId, [INITIAL_FEN], false), 150);
@@ -764,7 +761,7 @@ export default function App() {
       };
       setSnapshots([initialSnap]);
       setViewIndex(0);
-      setTelemetry({ confidence: null, topMoves: [], isBook: false });
+      setTelemetry({ confidence: null, topMoves: [], isBook: false, bookColor: null });
 
       const res = await fetch(`${API_BASE}/api/eval_only`, {
         method: 'POST',
@@ -795,7 +792,6 @@ export default function App() {
     if (gameOverStatus || isSpectatorMode || snapshots.length < 6) return;
     if (lastDrawOfferPly === snapshots.length) return;
 
-    // Se la Leggenda aveva già proposto patta, l'offerta la accetta immediatamente
     if (aiDrawProposal) {
       handleAcceptAiDraw();
       return;
@@ -943,7 +939,15 @@ export default function App() {
   const evalLabel = formatEvalLabel(currentSnapshot.evalWhite, currentSnapshot.mateIn);
   const whiteIsWinning = (currentSnapshot.mateIn ?? currentSnapshot.evalWhite ?? 0) >= 0;
 
-  // Etichetta per il giocatore in basso (Tu oppure la Leggenda in modalità Spettatore)
+  // Colori ed etichette per il giocatore in alto e in basso
+  const topColor = playerColor === 'w' ? 'b' : 'w';
+  const bottomColor = playerColor;
+
+  const liveTurn = useMemo(() => {
+    const latestFen = snapshots[snapshots.length - 1]?.fen || INITIAL_FEN;
+    return latestFen.split(' ')[1] || 'w';
+  }, [snapshots]);
+
   const bottomSpectatorLegend = useMemo(() => {
     const legId = playerColor === 'w' ? whiteLegend : blackLegend;
     return LEGENDS.find((l) => l.id === legId) || LEGENDS[0];
@@ -956,19 +960,28 @@ export default function App() {
 
   const displayedTopLegend = isSpectatorMode ? topSpectatorLegend : activeLegendObj;
 
+  // Determina quale dei due lati (alto o basso) sta effettivamente calcolando
+  const isTopThinking = kasparovThinking && (!isSpectatorMode || liveTurn === topColor);
+  const isBottomThinking = kasparovThinking && isSpectatorMode && liveTurn === bottomColor;
+
+  const showTopBookBadge =
+    telemetry.isBook && !isTopThinking && (!isSpectatorMode || telemetry.bookColor === topColor);
+  const showBottomBookBadge =
+    isSpectatorMode && telemetry.isBook && !isBottomThinking && telemetry.bookColor === bottomColor;
+
   return (
     <div className="lichess-container">
       {/* COLONNA SCACCHIERA + BARRA VALUTAZIONE */}
       <div className="board-column">
         <div className="player-info">
           <div className="player-title">
-            <span className="status-dot" data-thinking={kasparovThinking} />
-            <span>
-              {kasparovThinking
-                ? `🧠 ${isSpectatorMode ? (viewedGame.turn() === 'w' ? LEGENDS.find((l) => l.id === whiteLegend)?.name : LEGENDS.find((l) => l.id === blackLegend)?.name) : displayedTopLegend.name} sta calcolando (Alpha-Beta)...`
+            <span className="status-dot" data-thinking={isTopThinking} />
+            <span className="player-name-text">
+              {isTopThinking
+                ? `🧠 ${displayedTopLegend.name} sta calcolando (Alpha-Beta)...`
                 : `${displayedTopLegend.badge} ${displayedTopLegend.name} (${displayedTopLegend.title})`}
             </span>
-            {telemetry.isBook && !kasparovThinking && (
+            {showTopBookBadge && (
               <span className="book-badge" title="Mossa storica giocata realmente dal Grande Maestro">
                 📖 Book
               </span>
@@ -1048,11 +1061,21 @@ export default function App() {
 
         <div className="player-info">
           <div className="player-title">
-            <span>
+            {isSpectatorMode && (
+              <span className="status-dot" data-thinking={isBottomThinking} />
+            )}
+            <span className="player-name-text">
               {isSpectatorMode
-                ? `${bottomSpectatorLegend.badge} ${bottomSpectatorLegend.name} (${playerColor === 'w' ? 'Bianco' : 'Nero'})`
+                ? (isBottomThinking
+                    ? `🧠 ${bottomSpectatorLegend.name} sta calcolando (Alpha-Beta)...`
+                    : `${bottomSpectatorLegend.badge} ${bottomSpectatorLegend.name} (${bottomSpectatorLegend.title})`)
                 : `👤 Tu (${playerColor === 'w' ? 'Bianco' : 'Nero'})`}
             </span>
+            {showBottomBookBadge && (
+              <span className="book-badge" title="Mossa storica giocata realmente dal Grande Maestro">
+                📖 Book
+              </span>
+            )}
             {isViewingHistory && (
               <span className="history-badge" onClick={() => setViewIndex(snapshots.length - 1)}>
                 ⏪ Storico (Torna live)
